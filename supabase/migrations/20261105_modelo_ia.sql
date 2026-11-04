@@ -1,5 +1,5 @@
 -- [IA-04] Modelo aditivo de IA. Depende de 20261104_rls_por_rol.sql.
--- 20261105 reserva el siguiente prefijo para respetar el orden lexicográfico del harness.
+-- 2026-11-05 reserva el siguiente prefijo para respetar el orden lexicográfico del harness.
 -- Embeddings aprobados: OpenRouter / openai/text-embedding-3-small, 1536 dimensiones.
 -- Cambiar de modelo exige migrar la columna embedding, regenerar los embeddings y reindexar;
 -- cambiar solamente EMBEDDING_MODEL/EMBEDDING_DIM no convierte los vectores existentes.

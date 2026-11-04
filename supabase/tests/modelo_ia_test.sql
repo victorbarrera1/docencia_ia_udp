@@ -42,7 +42,7 @@ SELECT ia_test.expect((SELECT count(*) FROM pg_class c JOIN pg_am a ON a.oid = c
     JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname = 'idx_rag_chunks_embedding'
     AND a.amname = 'hnsw' AND i.indisvalid), 1, 'índice HNSW válido');
 SELECT ia_test.expect(public.next_version_n(:'sub1'), 3, 'siguiente versión tras las dos existentes');
-SELECT ia_test.expect_error(format('SELECT public.next_version_n(%L)', '00000000-0000-4000-a000-000000000000'), '23503', 'entrega inexistente no recibe versión');
+SELECT ia_test.expect_error(format('SELECT public.next_version_n(%L)', 'ffffffff-ffff-4fff-afff-ffffffffffff'), '23503', 'entrega inexistente no recibe versión');
 SELECT ia_test.expect_error(format($q$INSERT INTO public.submission_versions (submission_id, version_n, storage_path, subido_por)
     VALUES (%L, 1, 'test/duplicada.pdf', %L)$q$, :'sub1', :'teacher'), '23505', 'número de versión único por entrega');
 SELECT ia_test.expect_error(format($q$INSERT INTO public.submission_versions (submission_id, version_n, storage_path, subido_por)
@@ -53,12 +53,12 @@ SELECT ia_test.expect_error(format($q$UPDATE public.ai_reviews SET version_id = 
 SELECT ia_test.expect_error(format($q$UPDATE public.rag_chunks SET embedding = '[1,2,3]' WHERE owner_id = %L$q$, :'v1b'), '22000', 'rechaza embeddings de otra dimensión');
 SELECT ia_test.expect_error(format($q$UPDATE public.rag_chunks SET char_start = -1 WHERE owner_id = %L$q$, :'act1'), '23514', 'offsets no negativos');
 SELECT ia_test.expect_error(format($q$UPDATE public.rag_chunks SET owner_id = %L WHERE owner_id = %L$q$,
-    '00000000-0000-4000-a000-000000000000', :'act1'), '23514', 'propietario polimórfico debe existir');
+    'ffffffff-ffff-4fff-afff-ffffffffffff', :'act1'), '23514', 'propietario polimórfico debe existir');
 SELECT ia_test.expect_error(format($q$UPDATE public.rag_chunks SET texto = 'Cita falsaxxx' WHERE owner_id = %L$q$, :'v1b'), '23514', 'chunk de versión debe coincidir con el texto fuente');
 SELECT ia_test.expect_error(format($q$UPDATE public.ai_observations SET cita_texto = 'Cita inventada' WHERE review_id = %L$q$, :'r1'), '23514', 'cita inventada rechazada');
 SELECT ia_test.expect_error(format($q$UPDATE public.ai_observations SET cita_version_id = %L WHERE review_id = %L$q$, :'v2', :'r1'), '23514', 'cita no puede venir de otro estudiante');
 SELECT ia_test.expect_error(format($q$INSERT INTO public.ai_reviews (version_id, agente, modelo)
-    VALUES (%L, 'test/historia', 'fake/test');$q$, '00000000-0000-4000-a000-000000000000'), '23503', 'revisión requiere versión existente');
+    VALUES (%L, 'test/historia', 'fake/test');$q$, 'ffffffff-ffff-4fff-afff-ffffffffffff'), '23503', 'revisión requiere versión existente');
 INSERT INTO public.ai_reviews (version_id, agente, modelo) VALUES (:'v1', 'test/historia', 'fake/test') RETURNING id AS historical_review \gset
 SELECT ia_test.expect_error(format($q$INSERT INTO public.ai_observations
     (review_id, tipo, severidad, texto, cita_texto, cita_version_id, char_start, char_end)
