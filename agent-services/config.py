@@ -49,6 +49,14 @@ class AgentSettings(_BaseClass):
     openrouter_site_url: str = Field(default_factory=lambda: os.getenv("OPENROUTER_SITE_URL", "https://udp.cl"))
     openrouter_site_name: str = Field(default_factory=lambda: os.getenv("OPENROUTER_SITE_NAME", "Docencia IA UDP"))
 
+    # Cliente LLM robusto (IA-03)
+    llm_timeout_s: float = Field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT_S", "30")))
+    llm_max_retries: int = Field(default_factory=lambda: int(os.getenv("LLM_MAX_RETRIES", "2")))
+    llm_backoff_base_s: float = Field(default_factory=lambda: float(os.getenv("LLM_BACKOFF_BASE_S", "0.5")))
+    llm_fake: bool = Field(default_factory=lambda: os.getenv("LLM_FAKE", "").strip().lower() in ("1", "true", "yes"))
+    # Prefijos de modelo que aceptan response_format json_schema estricto (separados por coma).
+    llm_json_schema_models: str = Field(default_factory=lambda: os.getenv("LLM_JSON_SCHEMA_MODELS", "openai/,google/"))
+
     gemini_api_key: str = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
     default_frontier_model: str = Field(default_factory=lambda: os.getenv("DEFAULT_FRONTIER_MODEL", "gemini-2.5-flash"))
     default_worker_model: str = Field(default_factory=lambda: os.getenv("DEFAULT_WORKER_MODEL", "gemini-2.5-flash"))
