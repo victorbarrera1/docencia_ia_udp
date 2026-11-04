@@ -1,8 +1,10 @@
 """Piezas puras del cliente LLM: tipos, excepciones, schema estricto, extracción de JSON y modo fake."""
+import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ValidationError
 
@@ -139,3 +141,29 @@ def fake_instance(schema: type[BaseModel]) -> BaseModel:
         return schema.model_validate(data)
     except ValidationError as exc:
         raise LLMValidationError(f"El modo fake no pudo satisfacer el schema: {validation_summary(exc)}") from exc
+
+
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def fake_embedding(text: str, dim: int) -> List[float]:
+    """
+    Embedding determinista para LLM_FAKE y tests: bolsa de palabras con hashing, normalizada a norma 1.
+    Textos que comparten palabras quedan cerca (similitud coseno alta), así que el ranking es verificable.
+    """
+    vector = [0.0] * dim
+    for word in _WORD_RE.findall(text.lower()):
+        digest = hashlib.sha256(word.encode("utf-8")).digest()
+        vector[int.from_bytes(digest[:4], "big") % dim] += 1.0 if digest[4] % 2 == 0 else -1.0
+    norm = math.sqrt(sum(v * v for v in vector))
+    if norm == 0.0:
+        vector[0], norm = 1.0, 1.0
+    return [v / norm for v in vector]
+
+
+@dataclass(frozen=True)
+class EmbeddingBatch:
+    """Resultado de una llamada de embeddings. `model` es la etiqueta a guardar en rag_chunks.embedding_model."""
+    vectors: List[List[float]]
+    model: str
+    meta: LLMMeta

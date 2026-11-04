@@ -150,3 +150,12 @@ class AuditReportResponse(BaseModel):
     por_modelo: List[AuditModelUsage]
     items: List[AuditItem]
     truncated: bool = Field(description="Hay más filas que `limit`; los totales siempre cubren todo el filtro")
+
+class RagIndexResponse(BaseModel):
+    """Resultado de un indexado (IA-06)."""
+    embebidos: int = Field(description="Chunks a los que se les escribió embedding en esta llamada")
+    omitidos_modelo_distinto: int = Field(description="Chunks embebidos con otro modelo; solo `force=true` los re-embebe")
+    chunks: Optional[Dict[str, int]] = Field(default=None, description="insertados/actualizados/sin_cambios/borrados (rúbrica y material)")
+
+class CourseMaterialRequest(BaseModel):
+    texto: str = Field(min_length=1)
