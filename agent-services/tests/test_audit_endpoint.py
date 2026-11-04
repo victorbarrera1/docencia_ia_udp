@@ -15,16 +15,16 @@ ACTOR = "a1040000-0000-4000-a000-000000000001"
 # Respuesta de la RPC ai_audit_totals tal como la entrega PostgREST (numeric como número JSON exacto).
 TOTALS = """[
  {"modelo":"openai/gpt-4o","es_total":false,"llamadas":3,"llamadas_ok":2,"llamadas_error":1,"tokens_in":307,"tokens_out":53,
-  "costo_usd":0.0000000007,"llamadas_sin_costo":0},
+  "costo_usd":0.0007,"llamadas_sin_costo":0},
  {"modelo":"google/gemini-2.5-flash","es_total":false,"llamadas":1,"llamadas_ok":1,"llamadas_error":0,"tokens_in":50,"tokens_out":5,
-  "costo_usd":0.0000000000,"llamadas_sin_costo":1},
+  "costo_usd":0.0000,"llamadas_sin_costo":1},
  {"modelo":null,"es_total":true,"llamadas":4,"llamadas_ok":3,"llamadas_error":1,"tokens_in":357,"tokens_out":58,
-  "costo_usd":0.0000000007,"llamadas_sin_costo":1}
+  "costo_usd":0.0007,"llamadas_sin_costo":1}
 ]"""
 
 
 def item(n, cost):
-    return {"id": f"00000000-0000-4000-a000-00000000000{n}", "ts": f"2026-11-0{n}T12:00:00+00:00", "actor": ACTOR,
+    return {"id": f"e1070000-0000-4000-a000-00000000000{n}", "ts": f"2026-11-0{n}T12:00:00+00:00", "actor": ACTOR,
             "section_id": SECTION, "version_id": None, "agente": "evaluador", "modelo": "openai/gpt-4o",
             "tokens_in": 10, "tokens_out": 2, "costo_usd": cost, "latencia_ms": 5, "ok": True, "error": None}
 
@@ -32,7 +32,7 @@ def item(n, cost):
 class Upstream:
     def __init__(self, totals=TOTALS, rows=None, status=200):
         self.totals = totals
-        self.rows = rows if rows is not None else [item(3, 0.0000000004), item(2, None), item(1, 0.0000000000)]
+        self.rows = rows if rows is not None else [item(3, 0.0004), item(2, None), item(1, 0.0000)]
         self.status, self.requests = status, []
 
     def handle(self, request):
@@ -62,10 +62,10 @@ def test_totals_by_model_and_items(client, auth_headers, upstream):
     upstream()
     body = client.get(URL, headers=auth_headers).json()
     assert body["total"] == {"llamadas": 4, "llamadas_ok": 3, "llamadas_error": 1, "tokens_in": 357, "tokens_out": 58,
-                             "costo_usd": "0.0000000007", "llamadas_sin_costo": 1}
+                             "costo_usd": "0.0007", "llamadas_sin_costo": 1}
     assert [(m["modelo"], m["llamadas"], m["costo_usd"]) for m in body["por_modelo"]] == [
-        ("openai/gpt-4o", 3, "0.0000000007"), ("google/gemini-2.5-flash", 1, "0.0000000000")]
-    assert [i["costo_usd"] for i in body["items"]] == ["0.0000000004", None, "0.0"]  # NULL ≠ 0 (json.dumps escribe 0.0; PostgREST enviaría 0.0000000000)
+        ("openai/gpt-4o", 3, "0.0007"), ("google/gemini-2.5-flash", 1, "0.0000")]
+    assert [i["costo_usd"] for i in body["items"]] == ["0.0004", None, "0.0"]  # NULL ≠ 0 (json.dumps escribe 0.0; PostgREST enviaría 0.0000)
     assert body["items"][0]["actor"] == ACTOR and body["truncated"] is False
 
 
@@ -90,10 +90,10 @@ def test_truncated_when_more_rows_than_limit(client, auth_headers, upstream):
 
 
 def test_empty_range_returns_zero_total(client, auth_headers, upstream):
-    zero = '[{"modelo":null,"es_total":true,"llamadas":0,"llamadas_ok":0,"llamadas_error":0,"tokens_in":0,"tokens_out":0,"costo_usd":0.0000000000,"llamadas_sin_costo":0}]'
+    zero = '[{"modelo":null,"es_total":true,"llamadas":0,"llamadas_ok":0,"llamadas_error":0,"tokens_in":0,"tokens_out":0,"costo_usd":0.0000,"llamadas_sin_costo":0}]'
     upstream(totals=zero, rows=[])
     body = client.get(URL, headers=auth_headers).json()
-    assert body["por_modelo"] == [] and body["items"] == [] and body["total"]["costo_usd"] == "0.0000000000"
+    assert body["por_modelo"] == [] and body["items"] == [] and body["total"]["costo_usd"] == "0.0000"
 
 
 @pytest.mark.parametrize("params", [
