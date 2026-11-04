@@ -6,6 +6,18 @@ os.environ["ENVIRONMENT"] = "test"
 os.environ["OPENROUTER_API_KEY"] = ""
 os.environ["GEMINI_API_KEY"] = ""
 os.environ["LLM_FAKE"] = "0"
+# Sin Supabase real: los tests no deben depender del .env local (en CI no existe).
+for _var in (
+    "SUPABASE_URL",
+    "NEXT_PUBLIC_SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+    "SUPABASE_DB_HOST",
+    "SUPABASE_DB_USER",
+    "SUPABASE_DB_PORT",
+    "SUPABASE_PASSWORD",
+):
+    os.environ[_var] = ""
 
 import httpx  # noqa: E402
 import pytest  # noqa: E402

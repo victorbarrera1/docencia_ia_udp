@@ -1,6 +1,8 @@
+import logging
 import secrets
+from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import asyncio
@@ -12,13 +14,18 @@ from core.models import (
     SubmissionEvaluationRequest,
     SubmissionEvaluationResponse,
     ActivityDesignRequest,
-    ActivityDesignResponse
+    ActivityDesignResponse,
+    SubmissionVersionResponse
 )
+from core.submission_ingest import IngestError, ingest_submission_pdf
+from core.submission_store import StoreNotConfigured, SubmissionStore
 from core.hierarchy import hierarchy_manager
 from agents.root import root_agent
 from agents.specialists.submission_evaluator import submission_evaluator_worker
 from agents.specialists.activity_designer import activity_designer_worker
 from protocols.agent_card import get_agent_card
+
+logger = logging.getLogger(__name__)
 
 # En producción no se publica la documentación ni el esquema OpenAPI (revela la superficie de la API)
 _is_production = settings.environment.strip().lower() == "production"
@@ -41,6 +48,21 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-Agent-Service-Key"],
 )
 
+# Margen para los campos y bordes del multipart sobre el límite del PDF.
+_MULTIPART_OVERHEAD = 1024 * 1024
+
+@app.middleware("http")
+async def limit_submission_upload_size(request: Request, call_next):
+    """Rechaza subidas enormes antes de que el parser multipart las escriba a disco."""
+    if request.url.path.startswith("/api/v1/submissions/"):
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > settings.max_pdf_bytes + _MULTIPART_OVERHEAD:
+            return JSONResponse(
+                status_code=413,
+                content={"error": "El archivo supera el límite de 20 MB.", "code": "ARCHIVO_DEMASIADO_GRANDE"},
+            )
+    return await call_next(request)
+
 def require_service_key(request: Request):
     """Evita que el microservicio sea invocado directamente desde Internet."""
     expected = settings.agent_service_api_key
@@ -48,6 +70,12 @@ def require_service_key(request: Request):
         raise HTTPException(status_code=503, detail="Servicio no disponible.")
     if not secrets.compare_digest(request.headers.get("X-Agent-Service-Key", ""), expected):
         raise HTTPException(status_code=401, detail="No autorizado.")
+
+def get_submission_store() -> SubmissionStore:
+    try:
+        return SubmissionStore.from_settings()
+    except StoreNotConfigured:
+        raise HTTPException(status_code=503, detail="Servicio no disponible.")
 
 @app.get("/health")
 def health_check():
@@ -113,6 +141,42 @@ def handle_activity_design(request: ActivityDesignRequest):
             status_code=500,
             content={"error": "Error interno al diseñar la actividad con el Agente 1."}
         )
+
+@app.post(
+    "/api/v1/submissions/{submission_id}/versions",
+    response_model=SubmissionVersionResponse,
+    status_code=201,
+    dependencies=[Depends(require_service_key)],
+)
+def handle_submission_version(
+    submission_id: UUID,
+    uploaded_by: UUID = Form(...),
+    file: UploadFile = File(...),
+    store: SubmissionStore = Depends(get_submission_store),
+):
+    """
+    Ingesta de una entrega en PDF (IA-05): extrae texto con offsets, crea la versión siguiente
+    (marca atrasada según due_date) y guarda el archivo en el bucket privado "entregas".
+    """
+    try:
+        data = file.file.read(settings.max_pdf_bytes + 1)
+        result = ingest_submission_pdf(store, str(submission_id), str(uploaded_by), file.content_type or "", data)
+    except IngestError as e:
+        return JSONResponse(status_code=e.status, content={"error": e.message, "code": e.code})
+    except Exception:
+        logger.exception("Fallo inesperado al ingerir la entrega")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "No se pudo procesar la solicitud en este momento."}
+        )
+    return SubmissionVersionResponse(
+        version_id=result.version.id,
+        version_n=result.version.version_n,
+        atrasada=result.version.atrasada,
+        paginas=result.pages,
+        caracteres=result.characters,
+        chunks=result.version.chunks,
+    )
 
 @app.post("/api/v1/agent/stream", dependencies=[Depends(require_service_key)])
 async def stream_agent_chat(request: AgentChatRequest):

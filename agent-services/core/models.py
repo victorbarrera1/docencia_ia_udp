@@ -80,6 +80,15 @@ class SubmissionEvaluationResponse(BaseModel):
     sugerencias_mejora: List[str]
     profesor_revisor_pendiente: bool = True
 
+class SubmissionVersionResponse(BaseModel):
+    """Resultado de la ingesta de un PDF (IA-05). No expone la ruta interna de Storage."""
+    version_id: str
+    version_n: int
+    atrasada: bool
+    paginas: int
+    caracteres: int
+    chunks: int
+
 class ActivityInstructionStep(BaseModel):
     paso: int
     titulo: str
