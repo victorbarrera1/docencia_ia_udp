@@ -8,6 +8,7 @@ from core.models import (
     ActivityInstructionStep,
     RubricItem,
 )
+from core.llm_support import LLMCallContext
 from core.openrouter_client import openrouter_client
 
 logger = logging.getLogger("activity_designer")
@@ -71,6 +72,7 @@ class ActivityDesignerWorker:
                 model=self.default_model,
                 response_format={"type": "json_object"},
                 temperature=0.2,
+                context=LLMCallContext(agente=self.role_name),
             )
 
             if not res.get("error") and res.get("content"):

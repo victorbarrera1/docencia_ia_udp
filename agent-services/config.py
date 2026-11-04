@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 def _load_env_file(filepath: Path):
     if filepath.exists():
@@ -57,9 +57,26 @@ class AgentSettings(_BaseClass):
     llm_max_retries: int = Field(default_factory=lambda: int(os.getenv("LLM_MAX_RETRIES", "2")))
     llm_backoff_base_s: float = Field(default_factory=lambda: float(os.getenv("LLM_BACKOFF_BASE_S", "0.5")))
     llm_fake: bool = Field(default_factory=lambda: os.getenv("LLM_FAKE", "").strip().lower() in ("1", "true", "yes"))
+    @field_validator("llm_fake", mode="before")
+    @classmethod
+    def _llm_fake_from_text(cls, value):
+        """LLM_FAKE vacío (p. ej. `LLM_FAKE=` en .env) es false en vez de fallar con bool_parsing."""
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes")
+        return value
+
     # Prefijos de modelo que aceptan response_format json_schema estricto (separados por coma).
     llm_json_schema_models: str = Field(default_factory=lambda: os.getenv("LLM_JSON_SCHEMA_MODELS", "openai/,google/"))
 
+    # Modelo del chat jerárquico (core/engine.py), vía OpenRouter; mismo modelo que se usaba directo con Gemini.
+    chat_model: str = Field(default_factory=lambda: os.getenv("CHAT_MODEL", "google/gemini-2.5-flash"))
+
+    # Registro auditable del uso de IA (IA-07): listener que escribe en ai_audit_log.
+    audit_enabled: bool = Field(default_factory=lambda: os.getenv("AI_AUDIT_ENABLED", "1").strip().lower() not in ("0", "false", "no"))
+    audit_timeout_s: float = Field(default_factory=lambda: float(os.getenv("AI_AUDIT_TIMEOUT_S", "3")))
+
+    # DEPRECADOS: desde IA-07 el chat pasa por OpenRouter (CHAT_MODEL) y nada los lee.
+    # Se retiran, junto con google-genai, cuando se coordine con el frontend.
     gemini_api_key: str = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
     default_frontier_model: str = Field(default_factory=lambda: os.getenv("DEFAULT_FRONTIER_MODEL", "gemini-2.5-flash"))
     default_worker_model: str = Field(default_factory=lambda: os.getenv("DEFAULT_WORKER_MODEL", "gemini-2.5-flash"))

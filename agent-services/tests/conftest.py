@@ -82,3 +82,10 @@ def client():
 @pytest.fixture
 def auth_headers():
     return {"X-Agent-Service-Key": SERVICE_KEY}
+
+
+@pytest.fixture
+def supabase_env(monkeypatch):
+    """Supabase ficticio configurado: el único tráfico posible es el de un httpx.MockTransport inyectado."""
+    monkeypatch.setattr(settings, "supabase_url", "https://proyecto-ficticio.supabase.co")
+    monkeypatch.setattr(settings, "supabase_service_role_key", "service-key-ficticia")

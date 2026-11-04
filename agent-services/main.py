@@ -1,8 +1,10 @@
 import logging
 import secrets
+from datetime import date
+from typing import Optional
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import asyncio
@@ -15,7 +17,8 @@ from core.models import (
     SubmissionEvaluationResponse,
     ActivityDesignRequest,
     ActivityDesignResponse,
-    SubmissionVersionResponse
+    SubmissionVersionResponse,
+    AuditReportResponse,
 )
 from core.submission_ingest import IngestError, ingest_submission_pdf
 from core.submission_store import StoreNotConfigured, SubmissionStore
@@ -24,6 +27,11 @@ from agents.root import root_agent
 from agents.specialists.submission_evaluator import submission_evaluator_worker
 from agents.specialists.activity_designer import activity_designer_worker
 from protocols.agent_card import get_agent_card
+from core.audit import AuditNotConfigured, setup_audit
+from core.audit_report import AuditQueryError, fetch_audit_report
+
+# IA-07: cada llamada a un LLM deja una fila de metadatos en ai_audit_log
+setup_audit()
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +106,28 @@ def get_hierarchy_tree():
         "tree": hierarchy_manager.list_tree(),
         "total_nodes": len(hierarchy_manager.list_tree())
     }
+
+@app.get("/api/v1/audit", response_model=AuditReportResponse, dependencies=[Depends(require_service_key)])
+def get_ai_audit(
+    section_id: Optional[UUID] = None,
+    desde: Optional[date] = None,
+    hasta: Optional[date] = None,
+    agente: Optional[str] = Query(default=None, max_length=100),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """
+    Registro de uso de IA (IA-07): totales exactos por modelo y últimas filas, para la rendición del fondo.
+    `desde`/`hasta` son fechas UTC inclusivas. Los totales cubren todo el filtro; `items` solo las últimas `limit`.
+    """
+    if desde and hasta and desde > hasta:
+        raise HTTPException(status_code=422, detail="`desde` no puede ser posterior a `hasta`.")
+    try:
+        return fetch_audit_report(str(section_id) if section_id else None, desde, hasta, agente, limit)
+    except AuditNotConfigured:
+        return JSONResponse(status_code=503, content={"error": "Servicio de auditoría no disponible."})
+    except AuditQueryError as exc:
+        logger.error("Consulta de auditoría falló: %s", exc)
+        return JSONResponse(status_code=502, content={"error": "No se pudo consultar la auditoría en este momento."})
 
 @app.post("/api/v1/agent/chat", response_model=AgentChatResponse, dependencies=[Depends(require_service_key)])
 def handle_agent_chat(request: AgentChatRequest):
