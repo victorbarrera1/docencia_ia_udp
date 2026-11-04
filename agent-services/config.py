@@ -49,6 +49,9 @@ class AgentSettings(_BaseClass):
     # IA-04: contrato de rag_chunks.embedding; cambiarlo exige migración y reindexación.
     embedding_model: str = Field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-small"))
     embedding_dim: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "1536")), gt=0)
+    embedding_batch_size: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_BATCH_SIZE", "32")), gt=0, le=256)
+    # IA-06: indexar en segundo plano cada versión recién subida; si falla, el backfill la recoge.
+    rag_auto_index: bool = Field(default_factory=lambda: os.getenv("RAG_AUTO_INDEX", "1").strip().lower() not in ("0", "false", "no"))
     openrouter_site_url: str = Field(default_factory=lambda: os.getenv("OPENROUTER_SITE_URL", "https://udp.cl"))
     openrouter_site_name: str = Field(default_factory=lambda: os.getenv("OPENROUTER_SITE_NAME", "Docencia IA UDP"))
 

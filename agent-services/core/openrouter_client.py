@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import random
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -9,8 +10,8 @@ from pydantic import BaseModel, ValidationError
 
 from config import settings
 from core.llm_support import (
-    LLMCallContext, LLMError, LLMHTTPError, LLMMeta, LLMNotConfigured, LLMTransportError,
-    LLMValidationError, extract_json, fake_instance, harden_schema, parse_retry_after,
+    EmbeddingBatch, LLMCallContext, LLMError, LLMHTTPError, LLMMeta, LLMNotConfigured, LLMTransportError,
+    LLMValidationError, extract_json, fake_embedding, fake_instance, harden_schema, parse_retry_after,
     validation_summary,
 )
 
@@ -192,6 +193,66 @@ class OpenRouterClient:
             self._fail(e, self._meta(used_model, totals, started, sent["n"], error=str(e)), context)
         raise AssertionError("inalcanzable")  # pragma: no cover
 
+    def embeddings(
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        context: Optional[LLMCallContext] = None,
+    ) -> EmbeddingBatch:
+        """
+        Vectores de `texts` vía OpenRouter /embeddings (misma ruta de reintentos y auditoría que el chat).
+        Un lote = una llamada auditada. IMPORTANTE: los textos deben venir ya seudonimizados; el único
+        llamador permitido es rag.embedder.PrivateEmbedder. Lanza LLMError (con `.meta`) ante cualquier fallo.
+        """
+        if not texts:
+            raise ValueError("embeddings requiere al menos un texto")
+        if not self.is_configured():
+            raise LLMNotConfigured("OPENROUTER_API_KEY no configurada")
+        target, dim = model or settings.embedding_model, settings.embedding_dim
+        started = time.perf_counter()
+        if settings.llm_fake:
+            meta = self._meta("fake/deterministic", {"cost": 0.0}, started, 0)
+            self._notify(meta, context)
+            return EmbeddingBatch([fake_embedding(t, dim) for t in texts], f"fake/{target}", meta)
+
+        payload = {"model": target, "input": list(texts), "encoding_format": "float"}
+        sent, used_model, usage = {"n": 0}, target, {}
+        try:
+            data = self._send(payload, sent, path="/embeddings")
+            if not isinstance(data, dict):
+                raise LLMError("Respuesta de embeddings no es un objeto")
+            used_model = data.get("model") or target
+            usage = data.get("usage") or {}
+            vectors = self._parse_embeddings(data, len(texts), dim)
+        except LLMError as e:
+            self._fail(e, self._meta(used_model, usage, started, sent["n"], error=str(e)), context)
+        meta = self._meta(used_model, {**usage, "completion_tokens": 0}, started, sent["n"])
+        self._notify(meta, context)
+        return EmbeddingBatch(vectors, target, meta)
+
+    @staticmethod
+    def _parse_embeddings(data: Dict[str, Any], expected: int, dim: int) -> List[List[float]]:
+        """Valida cantidad, orden y dimensión. Los mensajes llevan solo conteos, nunca contenido."""
+        items = data.get("data")
+        if not isinstance(items, list) or len(items) != expected:
+            raise LLMValidationError(f"La respuesta de embeddings no cumple el schema: se esperaban {expected} vectores")
+        try:
+            ordered = sorted(items, key=lambda item: item["index"])
+        except (KeyError, TypeError):
+            raise LLMValidationError("La respuesta de embeddings no cumple el schema: falta el índice") from None
+        if [item["index"] for item in ordered] != list(range(expected)):
+            raise LLMValidationError("La respuesta de embeddings no cumple el schema: índices inconsistentes")
+        vectors = []
+        for item in ordered:
+            vector = item.get("embedding")
+            valid = (isinstance(vector, list) and len(vector) == dim
+                     and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in vector))
+            if not valid:
+                raise LLMValidationError(f"La respuesta de embeddings no cumple el schema: se esperaban {dim} dimensiones")
+            vectors.append([float(v) for v in vector])
+        return vectors
+
     # ---------- Internos ----------
 
     def _fail(self, error: LLMError, meta: LLMMeta, context: Optional[LLMCallContext]) -> None:
@@ -233,7 +294,7 @@ class OpenRouterClient:
             except Exception:
                 logger.exception("Listener de auditoría LLM falló")
 
-    def _send(self, payload: Dict[str, Any], sent: Dict[str, int]) -> Dict[str, Any]:
+    def _send(self, payload: Dict[str, Any], sent: Dict[str, int], path: str = "/chat/completions") -> Dict[str, Any]:
         """POST con reintentos (429, 5xx, timeouts y errores de conexión). `sent["n"]` cuenta las peticiones."""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -245,7 +306,7 @@ class OpenRouterClient:
             sent["n"] += 1
             try:
                 with httpx.Client(timeout=settings.llm_timeout_s, transport=self._transport) as http:
-                    res = http.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
+                    res = http.post(f"{self.base_url}{path}", headers=headers, json=payload)
                 error = self._http_error(res)
                 if error is None:
                     return res.json()

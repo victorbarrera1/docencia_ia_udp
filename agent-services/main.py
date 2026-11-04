@@ -4,7 +4,7 @@ from datetime import date
 from typing import Optional
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import asyncio
@@ -19,9 +19,13 @@ from core.models import (
     ActivityDesignResponse,
     SubmissionVersionResponse,
     AuditReportResponse,
+    CourseMaterialRequest,
+    RagIndexResponse,
 )
 from core.submission_ingest import IngestError, ingest_submission_pdf
-from core.submission_store import StoreNotConfigured, SubmissionStore
+from core.llm_support import LLMError, LLMNotConfigured
+from core.submission_store import StoreError, StoreNotConfigured, SubmissionStore
+from rag.indexer import BACKFILL_MAX, IndexReport, RagIndexer, RagInputError, RagNotFound, auto_index_version
 from core.hierarchy import hierarchy_manager
 from agents.root import root_agent
 from agents.specialists.submission_evaluator import submission_evaluator_worker
@@ -84,6 +88,31 @@ def get_submission_store() -> SubmissionStore:
         return SubmissionStore.from_settings()
     except StoreNotConfigured:
         raise HTTPException(status_code=503, detail="Servicio no disponible.")
+
+def get_rag_indexer() -> RagIndexer:
+    try:
+        return RagIndexer.from_settings()
+    except StoreNotConfigured:
+        raise HTTPException(status_code=503, detail="Servicio no disponible.")
+
+def _rag_error(exc: Exception) -> JSONResponse:
+    """Errores del RAG con código estable y mensaje genérico (Regla 12): el detalle queda solo en el log."""
+    if isinstance(exc, RagNotFound):
+        return JSONResponse(status_code=404, content={"error": "No se encontró el recurso a indexar.", "code": "NO_ENCONTRADO"})
+    if isinstance(exc, RagInputError):
+        return JSONResponse(status_code=422, content={"error": "El texto no es válido para indexar.", "code": "TEXTO_INVALIDO"})
+    if isinstance(exc, LLMNotConfigured):
+        return JSONResponse(status_code=503, content={"error": "Embeddings no disponibles.", "code": "EMBEDDINGS_NO_CONFIGURADOS"})
+    if isinstance(exc, LLMError):
+        logger.error("Embeddings fallaron (%s)", type(exc).__name__)
+        return JSONResponse(status_code=502, content={"error": "No se pudieron generar los embeddings en este momento.", "code": "EMBEDDINGS_NO_DISPONIBLES"})
+    if isinstance(exc, StoreError):
+        return JSONResponse(status_code=502, content={"error": "No se pudo acceder al almacenamiento en este momento.", "code": "ALMACENAMIENTO_NO_DISPONIBLE"})
+    logger.exception("Fallo inesperado en el indexado RAG")
+    return JSONResponse(status_code=500, content={"error": "No se pudo procesar la solicitud en este momento."})
+
+def _rag_response(report: IndexReport) -> RagIndexResponse:
+    return RagIndexResponse(embebidos=report.embebidos, omitidos_modelo_distinto=report.omitidos_modelo_distinto, chunks=report.chunks)
 
 @app.get("/health")
 def health_check():
@@ -179,6 +208,7 @@ def handle_activity_design(request: ActivityDesignRequest):
     dependencies=[Depends(require_service_key)],
 )
 def handle_submission_version(
+    background_tasks: BackgroundTasks,
     submission_id: UUID,
     uploaded_by: UUID = Form(...),
     file: UploadFile = File(...),
@@ -199,6 +229,8 @@ def handle_submission_version(
             status_code=500,
             content={"error": "No se pudo procesar la solicitud en este momento."}
         )
+    if settings.rag_auto_index:  # IA-06: si falla, los chunks quedan sin embedding y los recoge /rag/backfill
+        background_tasks.add_task(auto_index_version, result.version.id)
     return SubmissionVersionResponse(
         version_id=result.version.id,
         version_n=result.version.version_n,
@@ -207,6 +239,41 @@ def handle_submission_version(
         caracteres=result.characters,
         chunks=result.version.chunks,
     )
+
+@app.post("/api/v1/rag/versions/{version_id}/index", response_model=RagIndexResponse, dependencies=[Depends(require_service_key)])
+def index_version(version_id: UUID, force: bool = False, indexer: RagIndexer = Depends(get_rag_indexer)):
+    """Embebe los chunks pendientes de una versión (IA-06). `force` re-embebe también los de otro modelo."""
+    try:
+        return _rag_response(indexer.index_version(str(version_id), force))
+    except Exception as exc:
+        return _rag_error(exc)
+
+@app.post("/api/v1/rag/activities/{activity_id}/rubric/index", response_model=RagIndexResponse, dependencies=[Depends(require_service_key)])
+def index_rubric(activity_id: UUID, force: bool = False, indexer: RagIndexer = Depends(get_rag_indexer)):
+    """Indexa los criterios de `activities.rubric_json` (un chunk por criterio; reemplaza los anteriores)."""
+    try:
+        return _rag_response(indexer.index_rubric(str(activity_id), force))
+    except Exception as exc:
+        return _rag_error(exc)
+
+@app.post("/api/v1/rag/courses/{course_id}/material", response_model=RagIndexResponse, dependencies=[Depends(require_service_key)])
+def index_course_material(course_id: UUID, body: CourseMaterialRequest, force: bool = False, indexer: RagIndexer = Depends(get_rag_indexer)):
+    """Indexa el material de cátedra de un curso. Reemplaza el corpus del curso (aún no hay catálogo de documentos)."""
+    try:
+        return _rag_response(indexer.index_course_material(str(course_id), body.texto, force))
+    except Exception as exc:
+        return _rag_error(exc)
+
+@app.post("/api/v1/rag/backfill", response_model=RagIndexResponse, dependencies=[Depends(require_service_key)])
+def backfill_embeddings(
+    limit: int = Query(default=200, ge=1, le=BACKFILL_MAX), force: bool = False,
+    indexer: RagIndexer = Depends(get_rag_indexer),
+):
+    """Embebe hasta `limit` chunks pendientes (p. ej. los que dejó el indexado automático al fallar)."""
+    try:
+        return _rag_response(indexer.backfill(limit, force))
+    except Exception as exc:
+        return _rag_error(exc)
 
 @app.post("/api/v1/agent/stream", dependencies=[Depends(require_service_key)])
 async def stream_agent_chat(request: AgentChatRequest):
