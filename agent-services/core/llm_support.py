@@ -13,6 +13,7 @@ class LLMCallContext:
     agente: Optional[str] = None
     section_id: Optional[str] = None
     version_id: Optional[str] = None
+    actor: Optional[str] = None  # users.id de quien dispara la llamada (lo aporta el puente de IA-09)
 
 
 @dataclass(frozen=True)

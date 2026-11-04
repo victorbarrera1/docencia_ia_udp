@@ -1,6 +1,8 @@
 import json
 from typing import List, Dict, Any, Tuple
 from config import settings
+from core.llm_support import LLMCallContext
+from core.openrouter_client import openrouter_client
 from tools.custom_tools import (
     calcular_decimas_nota_tool,
     consultar_descriptor_asignatura_tool,
@@ -60,21 +62,22 @@ class AgenticLoopEngine:
             tools_executed.append("consultar_descriptor_asignatura_tool")
             sources.append("Descriptor Oficial de Asignatura CIT3203")
 
-        # Generación de respuesta con trazabilidad
-        if settings.gemini_api_key:
-            try:
-                # Si la llave existe, invocamos cliente real
-                from google import genai
-                client = genai.Client(api_key=settings.gemini_api_key)
-                response = client.models.generate_content(
-                    model=settings.default_frontier_model,
-                    contents=f"{system_prompt}\n\nMensaje del usuario:\n{user_message}",
-                )
-                reply = response.text or "Respuesta generada."
-                tokens_est = len(reply) // 4 + len(user_message) // 4
-                return reply, tools_executed, sources, tokens_est
-            except Exception as e:
-                sources.append(f"Fallo llamada LLM directa: {str(e)[:50]}")
+        # Generación de respuesta con trazabilidad: toda llamada a un LLM pasa por OpenRouter y queda en ai_audit_log
+        if openrouter_client.is_configured():
+            res = openrouter_client.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Mensaje del usuario:\n{user_message}"},
+                ],
+                model=settings.chat_model,
+                context=LLMCallContext(agente=f"chat:{worker_role}" if worker_role else "chat"),
+            )
+            if not res.get("error") and res.get("content"):
+                reply = res["content"]
+                tokens = (res.get("usage") or {}).get("total_tokens") or (len(reply) // 4 + len(user_message) // 4)
+                return reply, tools_executed, sources, tokens
+            # Sin detalle del proveedor: el error crudo no sale hacia el frontend (Regla 12)
+            sources.append("Fallo llamada LLM; se usó la respuesta determinista")
 
         # Motor de respuesta agéntica contextual y determinista (Garantía de ejecución sin fallas)
         reply = self._build_contextual_response(user_message, node_name, worker_role, tools_executed)

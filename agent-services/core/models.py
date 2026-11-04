@@ -116,3 +116,37 @@ class ActivityDesignResponse(BaseModel):
     decimas_sugeridas: float
     pauta_ayudante: str
     model_used: str = "openrouter/auto"
+
+class AuditUsage(BaseModel):
+    """Uso de IA acumulado. `costo_usd` es texto decimal exacto (suma solo costos conocidos)."""
+    llamadas: int
+    llamadas_ok: int
+    llamadas_error: int
+    tokens_in: int
+    tokens_out: int
+    costo_usd: str
+    llamadas_sin_costo: int
+
+class AuditModelUsage(AuditUsage):
+    modelo: str
+
+class AuditItem(BaseModel):
+    id: str
+    ts: str
+    actor: Optional[str] = None
+    section_id: Optional[str] = None
+    version_id: Optional[str] = None
+    agente: str
+    modelo: str
+    tokens_in: int
+    tokens_out: int
+    costo_usd: Optional[str] = None  # None = costo desconocido; "0.0000000000" = costo cero
+    latencia_ms: int
+    ok: bool
+    error: Optional[str] = None
+
+class AuditReportResponse(BaseModel):
+    total: AuditUsage
+    por_modelo: List[AuditModelUsage]
+    items: List[AuditItem]
+    truncated: bool = Field(description="Hay más filas que `limit`; los totales siempre cubren todo el filtro")
