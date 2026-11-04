@@ -46,6 +46,9 @@ class AgentSettings(_BaseClass):
     default_openrouter_model: str = Field(default_factory=lambda: os.getenv("DEFAULT_OPENROUTER_MODEL", "openrouter/free"))
     activity_designer_model: str = Field(default_factory=lambda: os.getenv("ACTIVITY_DESIGNER_MODEL", "openrouter/free"))
     evaluator_model: str = Field(default_factory=lambda: os.getenv("EVALUATOR_MODEL", "openrouter/free"))
+    # IA-04: contrato de rag_chunks.embedding; cambiarlo exige migración y reindexación.
+    embedding_model: str = Field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-small"))
+    embedding_dim: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "1536")), gt=0)
     openrouter_site_url: str = Field(default_factory=lambda: os.getenv("OPENROUTER_SITE_URL", "https://udp.cl"))
     openrouter_site_name: str = Field(default_factory=lambda: os.getenv("OPENROUTER_SITE_NAME", "Docencia IA UDP"))
 

@@ -29,8 +29,11 @@ trap reset_public EXIT
 
 run_tests() {
   # Resultados de las consultas a /dev/null; las aserciones informan por NOTICE ("ok: ...") o abortan con "FALLA: ..."
-  "$PSQL_BIN" "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -o /dev/null -f "$DIR/rls_test.sql" 2>&1 | sed -n 's/.*NOTICE:  //p; s/.*ERROR:  //p'
-  return "${PIPESTATUS[0]}"
+  local test_file
+  for test_file in rls_test.sql modelo_ia_test.sql; do
+    "$PSQL_BIN" "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -o /dev/null -f "$DIR/$test_file" 2>&1 | sed -n 's/.*NOTICE:  //p; s/.*ERROR:  //p'
+  done
+  PSQL_BIN="$PSQL_BIN" bash "$DIR/version_concurrency.sh"
 }
 
 echo "== Escenario A: schema.sql + migraciones (como producción)"
