@@ -1,0 +1,37 @@
+name: Agent services
+
+on:
+  pull_request:
+    paths:
+      - "agent-services/**"
+      - ".github/workflows/agent-services.yml"
+  push:
+    branches: [staging, main]
+    paths:
+      - "agent-services/**"
+      - ".github/workflows/agent-services.yml"
+
+jobs:
+  test:
+    name: Lint, tests y evals
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-services
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            agent-services/requirements.txt
+            agent-services/requirements-dev.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Ruff (solo errores)
+        run: ruff check .
+      - name: Pytest
+        run: python -m pytest
+      - name: Evals
+        run: python evals/run_evals.py
