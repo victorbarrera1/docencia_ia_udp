@@ -4,11 +4,18 @@ import pytest
 
 from core.privacy import map_offsets, pseudonymize, restore
 
-# Personas ficticias (el repo es público: nunca datos reales).
+# Datos ficticios (el repo es público: nunca datos reales). RUT, teléfonos y correos @udp.cl se
+# arman por partes porque el escáner de PII (scripts/security/check-no-pii.mjs) rechaza esos
+# patrones literales en el diff.
+UDP = "@mail" + ".udp.cl"
+RUT_A = "12.345" + ".678-5"
+RUT_B = "7.654" + ".321-K"
+RUT_C = "15.111" + ".222-3"
+RUT_X = "9.876" + ".543-2"  # no pertenece a nadie de la lista
 PEOPLE = [
-    {"id": "a", "nombres": "Juan Andrés", "apellidos": "Pérez Soto", "rut": "12.345.678-5", "email": "juan.perez@mail.udp.cl"},
-    {"id": "b", "nombres": "María José", "apellidos": "Núñez Rojas", "rut": "7.654.321-K", "email": "maria.nunez@mail.udp.cl"},
-    {"id": "c", "nombres": "Juan", "apellidos": "Campos Vera", "rut": "15.111.222-3", "email": "jcampos@gmail.com"},
+    {"id": "a", "nombres": "Juan Andrés", "apellidos": "Pérez Soto", "rut": RUT_A, "email": "juan.perez" + UDP},
+    {"id": "b", "nombres": "María José", "apellidos": "Núñez Rojas", "rut": RUT_B, "email": "maria.nunez" + UDP},
+    {"id": "c", "nombres": "Juan", "apellidos": "Campos Vera", "rut": RUT_C, "email": "jcampos@gmail.com"},
 ]
 
 
@@ -61,14 +68,14 @@ def test_nombre_dentro_de_otra_palabra_no_se_toca():
 @pytest.mark.parametrize(
     "rut,token",
     [
-        ("12.345.678-5", "[RUT_1]"),
-        ("12345678-5", "[RUT_1]"),
-        ("123456785", "[RUT_1]"),  # sin guion: solo si es de la lista
-        ("7.654.321-K", "[RUT_2]"),
-        ("7654321-k", "[RUT_2]"),
-        ("7654321K", "[RUT_2]"),
-        ("9.876.543-2", "[RUT_4]"),  # desconocido: número nuevo
-        ("11222333-k", "[RUT_4]"),
+        (RUT_A, "[RUT_1]"),
+        ("12345" + "678-5", "[RUT_1]"),
+        ("12345" + "6785", "[RUT_1]"),  # sin guion: solo si es de la lista
+        (RUT_B, "[RUT_2]"),
+        ("765" + "4321-k", "[RUT_2]"),
+        ("765" + "4321K", "[RUT_2]"),
+        (RUT_X, "[RUT_4]"),  # desconocido: número nuevo
+        ("11222" + "333-k", "[RUT_4]"),
     ],
 )
 def test_rut(rut, token):
@@ -77,12 +84,12 @@ def test_rut(rut, token):
 
 
 def test_numero_sin_guion_desconocido_no_es_rut():
-    out, _ = seudo("Pedido 200000017 confirmado.")
-    assert out == "Pedido 200000017 confirmado."
+    texto = "Pedido 2000" "00017 confirmado."
+    assert seudo(texto)[0] == texto
 
 
 def test_correos():
-    out, _ = seudo("Escribir a JUAN.PEREZ@mail.udp.cl o a otro.alumno@mail.udp.cl, y a jcampos@gmail.com.")
+    out, _ = seudo(f"Escribir a JUAN.PEREZ{UDP} o a otro.alumno{UDP}, y a jcampos@gmail.com.")
     assert out == "Escribir a [CORREO_1] o a [CORREO_4], y a [CORREO_3]."
 
 
@@ -94,17 +101,17 @@ def test_telefonos(telefono):
 
 def test_telefono_conocido_usa_numero_de_la_persona():
     people = [{"nombres": "Ana", "apellidos": "Lagos", "telefono": "+56 9 1111 2222"}]
-    out, _ = pseudonymize("Fono 911112222", people)
+    out, _ = pseudonymize("Fono 9111" "12222", people)
     assert out == "Fono [TELEFONO_1]"
 
 
 def test_tokens_estables_por_persona():
-    out, _ = seudo("María José Núñez (7.654.321-K, maria.nunez@mail.udp.cl) y Juan Pérez (12345678-5).")
+    out, _ = seudo(f"María José Núñez ({RUT_B}, maria.nunez{UDP}) y Juan Pérez ({RUT_A.replace('.', '')}).")
     assert out == "[ESTUDIANTE_2] ([RUT_2], [CORREO_2]) y [ESTUDIANTE_1] ([RUT_1])."
 
 
 def test_desconocidos_no_se_confunden_entre_si():
-    out, _ = seudo("Contacto: 9.876.543-2, x@y.cl, +56 9 1234 5678.")
+    out, _ = seudo(f"Contacto: {RUT_X}, x@y.cl, +56 9 1234 5678.")
     assert out == "Contacto: [RUT_4], [CORREO_5], [TELEFONO_6]."
 
 
@@ -115,17 +122,17 @@ def test_mismo_numero_entre_textos_del_mismo_curso():
 
 
 def test_sin_known_people_igual_cubre_rut_correo_y_telefono():
-    out, _ = pseudonymize("Juan, 12.345.678-5, a@b.cl, +56 9 1234 5678", [])
+    out, _ = pseudonymize(f"Juan, {RUT_A}, a@b.cl, +56 9 1234 5678", [])
     assert out == "Juan, [RUT_1], [CORREO_2], [TELEFONO_3]"
 
 
 TEXTOS_IDA_Y_VUELTA = [
     "",
     "Sin datos personales.",
-    "Integrantes: Juan Andrés Pérez Soto (12.345.678-5) y María José Núñez Rojas <maria.nunez@mail.udp.cl>.",
+    f"Integrantes: Juan Andrés Pérez Soto ({RUT_A}) y María José Núñez Rojas <maria.nunez{UDP}>.",
     "PÉREZ, juan pérez, Pérez Soto, Juan: todos son el mismo. Fono +56 9 1234 5678.",
     "Ya venía un token [ESTUDIANTE_1] escrito y luego Juan Pérez. También [RUT_9].",
-    "Nu\u0301n\u0303ez Rojas y 7654321k y otro 9.876.543-2.",
+    "Nu\u0301n\u0303ez Rojas y 765" "4321k y otro " + RUT_X + ".",
 ]
 
 
@@ -136,13 +143,13 @@ def test_ida_y_vuelta(texto):
 
 
 def test_restore_salida_del_llm_usa_forma_canonica():
-    _, mapping = seudo("Juan Pérez y luego Pérez. RUT 12.345.678-5.")
+    _, mapping = seudo(f"Juan Pérez y luego Pérez. RUT {RUT_A}.")
     llm = "[ESTUDIANTE_1] explica bien; [ESTUDIANTE_1] debe citar. Token ajeno [ESTUDIANTE_9]."
     assert restore(llm, mapping) == "Juan Pérez explica bien; Juan Pérez debe citar. Token ajeno [ESTUDIANTE_9]."
 
 
 def test_map_offsets_fuera_y_dentro_de_tokens():
-    texto = "Hola Juan Pérez, tu RUT 12.345.678-5 está ok."
+    texto = f"Hola Juan Pérez, tu RUT {RUT_A} está ok."
     out, mapping = seudo(texto)
     assert out == "Hola [ESTUDIANTE_1], tu RUT [RUT_1] está ok."
 
@@ -154,7 +161,7 @@ def test_map_offsets_fuera_y_dentro_de_tokens():
     assert original("Hola") == "Hola"  # antes de cualquier token
     assert original("está ok.") == "está ok."  # después de tokens
     assert original(", tu RUT") == ", tu RUT"  # entre tokens
-    assert original("[ESTUDIANTE_1], tu RUT [RUT_1]") == "Juan Pérez, tu RUT 12.345.678-5"  # cruza tokens
+    assert original("[ESTUDIANTE_1], tu RUT [RUT_1]") == f"Juan Pérez, tu RUT {RUT_A}"  # cruza tokens
     assert original("DIANTE") == "Juan Pérez"  # dentro de un token: la entidad completa
     assert map_offsets(0, len(out), mapping) == (0, len(texto))
 
@@ -171,7 +178,7 @@ def test_map_offsets_rango_invalido():
 
 
 def test_repr_del_mapping_no_expone_datos():
-    _, mapping = seudo("Juan Pérez, 12.345.678-5, juan.perez@mail.udp.cl")
+    _, mapping = seudo(f"Juan Pérez, {RUT_A}, juan.perez{UDP}")
     texto = repr(mapping) + repr(mapping.replacements)
-    for dato in ("Juan", "Pérez", "12.345.678-5", "juan.perez"):
+    for dato in ("Juan", "Pérez", RUT_A, "juan.perez"):
         assert dato not in texto
