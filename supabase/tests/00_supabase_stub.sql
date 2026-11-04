@@ -37,3 +37,14 @@ GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated, service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO anon, authenticated, service_role;
+
+-- IA-05: Storage mínimo (solo la tabla de buckets). Las políticas de storage.objects no se emulan:
+-- el bucket privado se verifica por sus atributos, no por el acceso a objetos.
+CREATE SCHEMA IF NOT EXISTS storage;
+CREATE TABLE IF NOT EXISTS storage.buckets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    public BOOLEAN DEFAULT false,
+    file_size_limit BIGINT,
+    allowed_mime_types TEXT[]
+);

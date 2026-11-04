@@ -72,6 +72,15 @@ class AgentSettings(_BaseClass):
     supabase_url: str = Field(default_factory=lambda: os.getenv("NEXT_PUBLIC_SUPABASE_URL", ""))
     supabase_service_role_key: str = Field(default_factory=lambda: os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""))
 
+    # Ingesta de PDF (IA-05). El bucket y el límite de 20 MiB también están en la migración.
+    submission_bucket: str = Field(default_factory=lambda: os.getenv("SUBMISSION_BUCKET", "entregas"))
+    max_pdf_bytes: int = Field(default_factory=lambda: int(os.getenv("MAX_PDF_BYTES", str(20 * 1024 * 1024))), gt=0)
+    max_pdf_pages: int = Field(default_factory=lambda: int(os.getenv("MAX_PDF_PAGES", "300")), gt=0)
+    max_pdf_text_chars: int = Field(default_factory=lambda: int(os.getenv("MAX_PDF_TEXT_CHARS", "1500000")), gt=0)
+    # ~800 tokens con solape de ~100, a 4 caracteres por token (sin tokenizador en el servicio).
+    chunk_chars: int = Field(default_factory=lambda: int(os.getenv("CHUNK_CHARS", "3200")), gt=0)
+    chunk_overlap_chars: int = Field(default_factory=lambda: int(os.getenv("CHUNK_OVERLAP_CHARS", "400")), ge=0)
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

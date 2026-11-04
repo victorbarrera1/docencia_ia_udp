@@ -89,6 +89,30 @@ similitud coseno, ordenados por distancia. Excluye chunks aún sin embedding. El
 propietarios no reemplaza RLS: un UUID conocido no permite leer entregas ajenas. El servicio,
 que ignora RLS por diseño de Supabase, debe autorizar y acotar propietarios en el backend.
 
+## IA-05 — Ingesta de PDF y versionado
+
+`POST /api/v1/submissions/{submission_id}/versions` (multipart: `file`, `uploaded_by`; llave de
+servicio) crea la siguiente versión de una entrega existente. Límites: solo `application/pdf`
+(se verifica también el magic `%PDF-`), 20 MiB, 300 páginas, 1,5 M de caracteres extraídos.
+Errores con `code` estable: `TIPO_NO_PERMITIDO` (415), `ARCHIVO_DEMASIADO_GRANDE` /
+`PDF_DEMASIADO_LARGO` (413), `PDF_SIN_TEXTO` (escaneado) y `PDF_INVALIDO` (corrupto o con
+contraseña) (422), `ENTREGA_NO_ENCONTRADA` (404), `USUARIO_INVALIDO` (422),
+`ALMACENAMIENTO_NO_DISPONIBLE` (502).
+
+- **Texto y offsets.** `texto_extraido` es el texto *normalizado* (NFC, sin NUL/controles,
+  espacios colapsados). Los chunks (~3200 caracteres ≈ 800 tokens, solape 400, cortes en límite de
+  palabra) y cualquier cita de IA-08 usan offsets `[char_start, char_end)` sobre ese mismo texto.
+- **Transacción.** La RPC `create_submission_version(submission_id, subido_por, texto, chunks)`
+  (solo `service_role`) reserva `version_n` con `next_version_n`, calcula `atrasada`
+  (`clock_timestamp() > activities.due_date`; sin plazo, `false`), arma la ruta e inserta versión y
+  `rag_chunks` (con `embedding NULL`, lo completa IA-06). Una llamada PostgREST = una transacción.
+- **Archivo.** Después de la RPC, el backend sube el PDF a `entregas/{storage_path}` con
+  `x-upsert: false`; la ruta es `section/{id}/activity/{id}/submission/{id}/v{n}.pdf`. Si la subida
+  falla, borra la versión (los chunks caen en cascada).
+- **Bucket.** `entregas` es privado (migración `20261106_ingesta_pdf.sql`: `public=false`, 20 MiB,
+  solo PDF). No hay políticas en `storage.objects`: solo `service_role` accede. Si la migración
+  avisa que `storage.buckets` no existe, crear el bucket a mano con esos mismos atributos.
+
 ## Verificación local y CI
 
 ```bash
