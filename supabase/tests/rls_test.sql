@@ -143,8 +143,9 @@ SELECT rls_test.expect(
     (SELECT count(DISTINCT table_name) FROM information_schema.role_table_grants
      WHERE table_schema = 'public' AND grantee = 'authenticated'
        AND table_name NOT IN ('courses', 'sections', 'students', 'enrollments', 'class_sessions',
-                              'attendance_records', 'student_work_records', 'activities', 'activity_submissions')), 0,
-    'authenticated sin privilegios fuera de las 9 tablas académicas (users, auth_*, vista, etc.)');
+                              'attendance_records', 'student_work_records', 'activities', 'activity_submissions',
+                              'submission_versions', 'rag_chunks', 'ai_reviews', 'ai_observations', 'ai_audit_log')), 0,
+    'authenticated sin privilegios fuera de las tablas académicas e IA (users, auth_*, vista, etc.)');
 
 SELECT rls_test.expect(
     (SELECT count(*) FROM information_schema.column_privileges
@@ -165,7 +166,7 @@ SELECT rls_test.expect(
      AND p.proname NOT IN ('current_app_user_id', 'current_student_id', 'current_role_in_section',
                            'is_section_teacher', 'is_section_staff', 'is_section_member',
                            'is_staff_of_student', 'section_of_session', 'section_of_activity',
-                           'uuid_generate_v4')), 0,
+                           'uuid_generate_v4', 'match_rag_chunks')), 0,
     'authenticated no puede ejecutar RPCs del servidor (asistencia, décimas, apelaciones)');
 
 -- ------------------------------------------------------------------------------
