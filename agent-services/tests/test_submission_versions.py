@@ -135,10 +135,12 @@ def test_unknown_uploader_is_422(client, auth_headers, use_store):
     assert post(client, auth_headers, make_text_pdf([SAMPLE_LINES])).json()["code"] == "USUARIO_INVALIDO"
 
 
-def test_malformed_ids_are_422(client, auth_headers):
+def test_malformed_ids_are_422(client, auth_headers, use_store):
+    store = use_store(FakeStore())
     pdf = make_text_pdf([SAMPLE_LINES])
     assert post(client, auth_headers, pdf, url="/api/v1/submissions/no-es-uuid/versions").status_code == 422
     assert post(client, auth_headers, pdf, uploaded_by="no-es-uuid").status_code == 422
+    assert store.versions == [] and store.uploads == {}
 
 
 def test_failed_upload_compensates_and_hides_internals(client, auth_headers, use_store):

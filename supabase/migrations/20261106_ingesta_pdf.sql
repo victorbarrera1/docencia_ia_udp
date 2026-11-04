@@ -9,8 +9,8 @@ DO $$
 BEGIN
     IF to_regclass('storage.buckets') IS NOT NULL THEN
         INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-        VALUES ('entregas', 'entregas', false, 20971520, ARRAY['application/pdf'])
-        ON CONFLICT (id) DO UPDATE SET public = false, file_size_limit = 20971520,
+        VALUES ('entregas', 'entregas', false, 20 * 1024 * 1024, ARRAY['application/pdf'])
+        ON CONFLICT (id) DO UPDATE SET public = false, file_size_limit = 20 * 1024 * 1024,
             allowed_mime_types = ARRAY['application/pdf'];
     ELSE
         RAISE NOTICE 'storage.buckets no existe: crear el bucket privado "entregas" manualmente';

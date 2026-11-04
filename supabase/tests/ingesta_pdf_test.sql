@@ -33,7 +33,7 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ia_test TO anon, authenticated, service
 
 -- Bucket privado, solo PDF, 20 MiB.
 SELECT ia_test.expect((SELECT count(*) FROM storage.buckets WHERE id = 'entregas' AND NOT public
-    AND file_size_limit = 20971520 AND allowed_mime_types = ARRAY['application/pdf']), 1, 'bucket entregas privado, PDF, 20 MiB');
+    AND file_size_limit = 20 * 1024 * 1024 AND allowed_mime_types = ARRAY['application/pdf']), 1, 'bucket entregas privado, PDF, 20 MiB');
 
 -- Solo service_role ejecuta la RPC.
 SET LOCAL ROLE authenticated;
