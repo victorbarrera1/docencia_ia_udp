@@ -2,6 +2,7 @@ import os
 
 # Debe ejecutarse antes de importar la app: config.py carga .env y no pisa variables ya definidas.
 os.environ["AGENT_SERVICE_API_KEY"] = "test-service-key"
+os.environ["ENVIRONMENT"] = "test"
 os.environ["OPENROUTER_API_KEY"] = ""
 os.environ["GEMINI_API_KEY"] = ""
 

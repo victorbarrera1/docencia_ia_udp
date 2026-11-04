@@ -1,6 +1,6 @@
 import secrets
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import asyncio
@@ -20,10 +20,16 @@ from agents.specialists.submission_evaluator import submission_evaluator_worker
 from agents.specialists.activity_designer import activity_designer_worker
 from protocols.agent_card import get_agent_card
 
+# En producción no se publica la documentación ni el esquema OpenAPI (revela la superficie de la API)
+_is_production = settings.environment.strip().lower() == "production"
+
 app = FastAPI(
     title=settings.app_name,
     description="Microservicio agéntico jerárquico y desacoplado para docencia universitaria UDP",
-    version="1.0.0"
+    version="1.0.0",
+    docs_url=None if _is_production else "/docs",
+    redoc_url=None if _is_production else "/redoc",
+    openapi_url=None if _is_production else "/openapi.json",
 )
 
 # Configuración CORS permisiva en dev para Next.js
@@ -57,22 +63,20 @@ def get_a2a_agent_card():
     """Descubrimiento de capacidades bajo el protocolo estándar A2A."""
     return get_agent_card()
 
-@app.get("/api/v1/tree/hierarchy")
-def get_hierarchy_tree(request: Request):
+@app.get("/api/v1/tree/hierarchy", dependencies=[Depends(require_service_key)])
+def get_hierarchy_tree():
     """Retorna la estructura arbórea completa de agentes institucionalizados."""
-    require_service_key(request)
     return {
         "tree": hierarchy_manager.list_tree(),
         "total_nodes": len(hierarchy_manager.list_tree())
     }
 
-@app.post("/api/v1/agent/chat", response_model=AgentChatResponse)
-def handle_agent_chat(request: AgentChatRequest, http_request: Request):
+@app.post("/api/v1/agent/chat", response_model=AgentChatResponse, dependencies=[Depends(require_service_key)])
+def handle_agent_chat(request: AgentChatRequest):
     """
     Punto de entrada principal para consultas agénticas jerárquicas.
     Resuelve el linaje del nodo en el árbol y compila las políticas institucionales.
     """
-    require_service_key(http_request)
     try:
         response = root_agent.process_request(request)
         return response
@@ -83,12 +87,11 @@ def handle_agent_chat(request: AgentChatRequest, http_request: Request):
             content={"error": "No se pudo procesar la solicitud con el agente en este momento."}
         )
 
-@app.post("/api/v1/agent/evaluate", response_model=SubmissionEvaluationResponse)
-def handle_submission_evaluation(request: SubmissionEvaluationRequest, http_request: Request):
+@app.post("/api/v1/agent/evaluate", response_model=SubmissionEvaluationResponse, dependencies=[Depends(require_service_key)])
+def handle_submission_evaluation(request: SubmissionEvaluationRequest):
     """
     Endpoint especializado para corrección asistida y cálculo de décimas.
     """
-    require_service_key(http_request)
     try:
         return submission_evaluator_worker.evaluate_submission(request)
     except Exception:
@@ -97,7 +100,7 @@ def handle_submission_evaluation(request: SubmissionEvaluationRequest, http_requ
             content={"error": "Error interno al evaluar la entrega."}
         )
 
-@app.post("/api/v1/agent/design-activity", response_model=ActivityDesignResponse)
+@app.post("/api/v1/agent/design-activity", response_model=ActivityDesignResponse, dependencies=[Depends(require_service_key)])
 def handle_activity_design(request: ActivityDesignRequest):
     """
     Agente 1: Diseñador de Actividades y Rúbricas (OpenRouter).
@@ -111,13 +114,11 @@ def handle_activity_design(request: ActivityDesignRequest):
             content={"error": "Error interno al diseñar la actividad con el Agente 1."}
         )
 
-@app.post("/api/v1/agent/stream")
-async def stream_agent_chat(request: AgentChatRequest, http_request: Request):
+@app.post("/api/v1/agent/stream", dependencies=[Depends(require_service_key)])
+async def stream_agent_chat(request: AgentChatRequest):
     """
     Streaming en tiempo real mediante Server-Sent Events (SSE).
     """
-    require_service_key(http_request)
-
     async def event_generator():
         response = root_agent.process_request(request)
         chunks = response.reply.split(" ")
