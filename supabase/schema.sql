@@ -144,6 +144,30 @@ CREATE TABLE IF NOT EXISTS public.section_schedules (
 -- 4. ESTUDIANTES Y MATRÍCULA (NÓMINA INSTITUCIONAL CANVAS UDP)
 -- ------------------------------------------------------------------------------
 
+-- 4.0 Usuarios de la app (docentes, ayudantes, administradores). Autenticación propia del servidor
+--     (password_hash nunca se expone: sin privilegios para anon/authenticated). Antes la creaba
+--     scripts/normalize_canvas_schema.js; se declara aquí para que el esquema sea autocontenido.
+CREATE TABLE IF NOT EXISTS public.users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    canvas_user_id BIGINT UNIQUE NULL,            -- Vincula con students.canvas_id cuando el usuario es estudiante
+    rut VARCHAR(20) UNIQUE NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    username VARCHAR(100) UNIQUE NULL,
+    name VARCHAR(255) NOT NULL,
+    role_global VARCHAR(50) DEFAULT 'admin',
+    is_owner BOOLEAN DEFAULT FALSE,
+    salt VARCHAR(64) NULL,
+    password_hash TEXT NULL,
+    avatar_url TEXT NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+    auth_version INTEGER NOT NULL DEFAULT 1 CHECK (auth_version >= 1),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 1 CHECK (auth_version >= 1);
+CREATE INDEX IF NOT EXISTS idx_users_email ON public.users(LOWER(email));
+CREATE INDEX IF NOT EXISTS idx_users_canvas_id ON public.users(canvas_user_id);
+
 -- 4.1 Estudiantes
 CREATE TABLE IF NOT EXISTS public.students (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -161,12 +185,20 @@ CREATE TABLE IF NOT EXISTS public.students (
 CREATE TABLE IF NOT EXISTS public.enrollments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     section_id UUID NOT NULL REFERENCES public.sections(id) ON DELETE CASCADE,
-    student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
+    student_id UUID NULL REFERENCES public.students(id) ON DELETE CASCADE,   -- Alumnos
+    user_id UUID NULL REFERENCES public.users(id) ON DELETE CASCADE,         -- Docentes / ayudantes / observadores
+    enrollment_type VARCHAR(50) DEFAULT 'StudentEnrollment',                 -- TeacherEnrollment | TaEnrollment | ObserverEnrollment | StudentEnrollment
+    canvas_enrollment_id BIGINT NULL,
     role VARCHAR(20) DEFAULT 'student' CHECK (role IN ('student', 'assistant', 'teacher', 'observer')),
     status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'withdrawn', 'suspended')),
     enrolled_at TIMESTAMPTZ DEFAULT NOW(),
     CONSTRAINT uq_enrollment UNIQUE (section_id, student_id)
 );
+-- Migración para bases existentes (antes en scripts/normalize_canvas_schema.js)
+ALTER TABLE public.enrollments ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES public.users(id) ON DELETE CASCADE;
+ALTER TABLE public.enrollments ADD COLUMN IF NOT EXISTS enrollment_type VARCHAR(50) DEFAULT 'StudentEnrollment';
+ALTER TABLE public.enrollments ADD COLUMN IF NOT EXISTS canvas_enrollment_id BIGINT NULL;
+ALTER TABLE public.enrollments ALTER COLUMN student_id DROP NOT NULL;
 
 -- ------------------------------------------------------------------------------
 -- 5. SESIONES EFECTIVAS DE CLASES (ASISTENCIA Y PROGRAMACIÓN)
@@ -278,6 +310,7 @@ CREATE TABLE IF NOT EXISTS public.attendance_audit_logs (
 CREATE INDEX IF NOT EXISTS idx_sections_course ON public.sections(course_id);
 CREATE INDEX IF NOT EXISTS idx_enrollments_section ON public.enrollments(section_id);
 CREATE INDEX IF NOT EXISTS idx_enrollments_student ON public.enrollments(student_id);
+CREATE INDEX IF NOT EXISTS idx_enrollments_user_id ON public.enrollments(user_id);
 
 -- Sesiones
 CREATE INDEX IF NOT EXISTS idx_sessions_section_date ON public.class_sessions(section_id, date);
@@ -306,7 +339,8 @@ CREATE INDEX IF NOT EXISTS idx_activity_submissions_stu ON public.activity_submi
 -- 10. VISTAS RESUMEN DE RENDIMIENTO
 -- ------------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW public.v_student_attendance_summary AS
+-- security_invoker: respeta RLS de quien consulta (sin él, la vista correría como su dueño)
+CREATE OR REPLACE VIEW public.v_student_attendance_summary WITH (security_invoker = true) AS
 SELECT 
     e.section_id,
     s.id AS student_id,
@@ -510,60 +544,289 @@ CREATE OR REPLACE TRIGGER trg_sessions_updated_at BEFORE UPDATE ON public.class_
 CREATE OR REPLACE TRIGGER trg_work_records_updated_at BEFORE UPDATE ON public.student_work_records FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
 
 -- ------------------------------------------------------------------------------
--- 13. POLÍTICAS ROW LEVEL SECURITY (RLS)
+-- 13. SEGURIDAD: RLS POR ROL (estado final de 20261016_fase3c_bloqueo_rls + 20261104_rls_por_rol)
 -- ------------------------------------------------------------------------------
+-- La app accede con service_role desde el servidor (ignora RLS). anon no tiene acceso a nada.
+-- authenticated (JWT de Supabase con "sub" = public.users.id) tiene acceso mínimo por rol en la sección.
+-- Mantener sincronizado con supabase/migrations/20261104_rls_por_rol.sql (lo verifica supabase/tests/run.sh).
 
-ALTER TABLE public.institutions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.faculties ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.academic_programs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.academic_terms ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.courses ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.sections ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.section_schedules ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.students ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.enrollments ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.class_sessions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.attendance_records ENABLE ROW LEVEL SECURITY;
+-- 13.1 Bloqueo base: RLS en todas las tablas y sin privilegios por defecto para anon/authenticated
+DO $$
+DECLARE r RECORD;
+BEGIN
+    FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+        EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', r.tablename);
+    END LOOP;
+END $$;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES    FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC, anon, authenticated;
+
+-- 13.2 Helpers de identidad y rol (SECURITY DEFINER: leen users/enrollments sin depender de RLS) ---
+
+-- Usuario de la app asociado al JWT (null si no existe o está inactivo)
+CREATE OR REPLACE FUNCTION public.current_app_user_id()
+RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$
+    SELECT u.id FROM public.users u WHERE u.id = auth.uid() AND u.is_active IS TRUE
+$$;
+
+-- Fila de students del usuario (vínculo por ID de Canvas)
+CREATE OR REPLACE FUNCTION public.current_student_id()
+RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$
+    SELECT s.id
+    FROM public.students s
+    JOIN public.users u ON u.canvas_user_id = s.canvas_id
+    WHERE u.id = public.current_app_user_id() AND s.is_active IS TRUE
+    LIMIT 1
+$$;
+
+-- Rol más alto del usuario en la sección: teacher > assistant > observer > student (o null).
+-- Docentes y ayudantes se matriculan con user_id + enrollment_type (role queda en 'student' por
+-- defecto), por eso enrollment_type manda cuando es de staff.
+CREATE OR REPLACE FUNCTION public.current_role_in_section(p_section_id UUID)
+RETURNS TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$
+    SELECT r.role_name
+    FROM (
+        SELECT CASE e.enrollment_type
+                   WHEN 'TeacherEnrollment'  THEN 'teacher'
+                   WHEN 'TaEnrollment'       THEN 'assistant'
+                   WHEN 'ObserverEnrollment' THEN 'observer'
+                   ELSE e.role
+               END AS role_name
+        FROM public.enrollments e
+        WHERE e.section_id = p_section_id
+          AND COALESCE(e.status, 'active') = 'active'
+          AND (
+              (e.user_id IS NOT NULL AND e.user_id = public.current_app_user_id())
+              OR (e.student_id IS NOT NULL AND e.student_id = public.current_student_id())
+          )
+    ) r
+    ORDER BY CASE r.role_name WHEN 'teacher' THEN 1 WHEN 'assistant' THEN 2 WHEN 'observer' THEN 3 ELSE 4 END
+    LIMIT 1
+$$;
+
+CREATE OR REPLACE FUNCTION public.is_section_teacher(p_section_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$ SELECT COALESCE(public.current_role_in_section(p_section_id) = 'teacher', false) $$;
+
+-- Docente o ayudante (ven datos de estudiantes de la sección)
+CREATE OR REPLACE FUNCTION public.is_section_staff(p_section_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$ SELECT COALESCE(public.current_role_in_section(p_section_id) IN ('teacher', 'assistant'), false) $$;
+
+CREATE OR REPLACE FUNCTION public.is_section_member(p_section_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$ SELECT public.current_role_in_section(p_section_id) IS NOT NULL $$;
+
+-- ¿El estudiante está matriculado en alguna sección donde el usuario es staff?
+CREATE OR REPLACE FUNCTION public.is_staff_of_student(p_student_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM public.enrollments e
+        WHERE e.student_id = p_student_id AND public.is_section_staff(e.section_id)
+    )
+$$;
+
+CREATE OR REPLACE FUNCTION public.section_of_session(p_session_id UUID)
+RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$ SELECT cs.section_id FROM public.class_sessions cs WHERE cs.id = p_session_id $$;
+
+CREATE OR REPLACE FUNCTION public.section_of_activity(p_activity_id UUID)
+RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$ SELECT a.section_id FROM public.activities a WHERE a.id = p_activity_id $$;
+
+DO $$
+DECLARE fn TEXT;
+BEGIN
+    FOREACH fn IN ARRAY ARRAY[
+        'public.current_app_user_id()', 'public.current_student_id()',
+        'public.current_role_in_section(uuid)', 'public.is_section_teacher(uuid)',
+        'public.is_section_staff(uuid)', 'public.is_section_member(uuid)',
+        'public.is_staff_of_student(uuid)', 'public.section_of_session(uuid)',
+        'public.section_of_activity(uuid)'
+    ] LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon', fn);
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO authenticated, service_role', fn);
+    END LOOP;
+END $$;
+
+-- 13.3 Privilegios: se parte de cero para anon/authenticated y se concede lo mínimo ------------
+REVOKE ALL ON ALL TABLES    IN SCHEMA public FROM anon, authenticated;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM anon, authenticated;
+
+-- Los DEFAULT de id llaman a uuid_generate_v4(): quien inserta necesita poder ejecutarla
+DO $$
+BEGIN
+    IF to_regprocedure('uuid_generate_v4()') IS NOT NULL THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO authenticated', to_regprocedure('uuid_generate_v4()'));
+    END IF;
+END $$;
+
+GRANT SELECT ON public.courses TO authenticated;
+
+-- sections: sin pin_activo (el PIN del día solo lo entrega el servidor)
+GRANT SELECT (
+    id, course_id, canvas_section_id, code, name, teacher_name, teacher_email, assistant_name, assistant_email,
+    horario_catedra_dias, horario_catedra_inicio, horario_catedra_fin, horario_catedra_sala,
+    horario_ayudantia_dias, horario_ayudantia_inicio, horario_ayudantia_fin, horario_ayudantia_sala,
+    horario_ayudantia2, requiere_pin, requiere_geo, incluir_ayudantias_en_final, created_at, updated_at
+) ON public.sections TO authenticated;
+GRANT UPDATE (
+    horario_catedra_dias, horario_catedra_inicio, horario_catedra_fin, horario_catedra_sala,
+    horario_ayudantia_dias, horario_ayudantia_inicio, horario_ayudantia_fin, horario_ayudantia_sala,
+    horario_ayudantia2, pin_activo, requiere_pin, requiere_geo, incluir_ayudantias_en_final
+) ON public.sections TO authenticated;
+
+GRANT SELECT ON public.students TO authenticated;
+GRANT SELECT ON public.enrollments TO authenticated;
+
+-- class_sessions: sin pin
+GRANT SELECT (
+    id, section_id, session_code, date, dia_semana, type, modality, status, motivo_cancelacion,
+    start_time, end_time, room, created_at, updated_at
+) ON public.class_sessions TO authenticated;
+GRANT UPDATE (status, motivo_cancelacion, modality, start_time, end_time, room) ON public.class_sessions TO authenticated;
+
+-- attendance_records: sin IP ni geolocalización; escritura solo vía RPCs del servidor
+GRANT SELECT (id, session_id, student_id, value, marked_by, marked_at) ON public.attendance_records TO authenticated;
+
+GRANT SELECT, INSERT, UPDATE ON public.student_work_records TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.activities TO authenticated;
+GRANT SELECT, INSERT ON public.activity_submissions TO authenticated;
+GRANT UPDATE (status, decimas_obtained, feedback_text, evaluated_by, evaluated_at) ON public.activity_submissions TO authenticated;
+
+-- La vista corre con los permisos de quien consulta (no salta RLS) y sigue cerrada
+ALTER VIEW IF EXISTS public.v_student_attendance_summary SET (security_invoker = true);
+REVOKE ALL ON public.v_student_attendance_summary FROM anon, authenticated;
+
+-- 13.4 Políticas (reemplazan cualquier política abierta previa) ------------------------------
+ALTER TABLE public.courses              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sections             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.students             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.enrollments          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.class_sessions       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.attendance_records   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.student_work_records ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.activities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.activities           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.activity_submissions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.attendance_audit_logs ENABLE ROW LEVEL SECURITY;
 
--- Políticas de desarrollo y acceso institucional
+-- Políticas abiertas históricas (schema.sql y la migración de asistencia del 2026-10-11)
+DO $$
+DECLARE t TEXT;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['courses', 'sections', 'students', 'enrollments', 'class_sessions',
+                             'attendance_records', 'student_work_records', 'activities', 'activity_submissions'] LOOP
+        EXECUTE format('DROP POLICY IF EXISTS "lectura" ON public.%I', t);
+        EXECUTE format('DROP POLICY IF EXISTS "creacion" ON public.%I', t);
+        EXECUTE format('DROP POLICY IF EXISTS "actualizacion" ON public.%I', t);
+    END LOOP;
+END $$;
 DROP POLICY IF EXISTS "Permitir lectura general de cursos" ON public.courses;
-CREATE POLICY "Permitir lectura general de cursos" ON public.courses FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Permitir edición general de cursos" ON public.courses;
-CREATE POLICY "Permitir edición general de cursos" ON public.courses FOR ALL USING (true);
-
 DROP POLICY IF EXISTS "Permitir lectura de secciones" ON public.sections;
-CREATE POLICY "Permitir lectura de secciones" ON public.sections FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Permitir edición de secciones" ON public.sections;
-CREATE POLICY "Permitir edición de secciones" ON public.sections FOR ALL USING (true);
-
 DROP POLICY IF EXISTS "Permitir lectura de estudiantes" ON public.students;
-CREATE POLICY "Permitir lectura de estudiantes" ON public.students FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Permitir edición de estudiantes" ON public.students;
-CREATE POLICY "Permitir edición de estudiantes" ON public.students FOR ALL USING (true);
-
 DROP POLICY IF EXISTS "Permitir lectura de matricula" ON public.enrollments;
-CREATE POLICY "Permitir lectura de matricula" ON public.enrollments FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Permitir edición de matricula" ON public.enrollments;
-CREATE POLICY "Permitir edición de matricula" ON public.enrollments FOR ALL USING (true);
-
 DROP POLICY IF EXISTS "Permitir lectura de sesiones" ON public.class_sessions;
-CREATE POLICY "Permitir lectura de sesiones" ON public.class_sessions FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Permitir edición de sesiones" ON public.class_sessions;
-CREATE POLICY "Permitir edición de sesiones" ON public.class_sessions FOR ALL USING (true);
-
 DROP POLICY IF EXISTS "Permitir lectura de asistencia" ON public.attendance_records;
-CREATE POLICY "Permitir lectura de asistencia" ON public.attendance_records FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Permitir edición de asistencia" ON public.attendance_records;
-CREATE POLICY "Permitir edición de asistencia" ON public.attendance_records FOR ALL USING (true);
-
 DROP POLICY IF EXISTS "Permitir lectura de work records" ON public.student_work_records;
-CREATE POLICY "Permitir lectura de work records" ON public.student_work_records FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Permitir edición de work records" ON public.student_work_records;
-CREATE POLICY "Permitir edición de work records" ON public.student_work_records FOR ALL USING (true);
+
+-- courses: miembros de alguna sección del curso
+DROP POLICY IF EXISTS rls_courses_select ON public.courses;
+CREATE POLICY rls_courses_select ON public.courses FOR SELECT TO authenticated
+    USING (EXISTS (SELECT 1 FROM public.sections s WHERE s.course_id = courses.id AND public.is_section_member(s.id)));
+
+-- sections: miembros leen; solo el docente actualiza la configuración
+DROP POLICY IF EXISTS rls_sections_select ON public.sections;
+CREATE POLICY rls_sections_select ON public.sections FOR SELECT TO authenticated
+    USING (public.is_section_member(id));
+DROP POLICY IF EXISTS rls_sections_update_teacher ON public.sections;
+CREATE POLICY rls_sections_update_teacher ON public.sections FOR UPDATE TO authenticated
+    USING (public.is_section_teacher(id)) WITH CHECK (public.is_section_teacher(id));
+
+-- students: cada estudiante solo su fila; docente/ayudante, los de sus secciones (RUT y correo ajenos protegidos)
+DROP POLICY IF EXISTS rls_students_select ON public.students;
+CREATE POLICY rls_students_select ON public.students FOR SELECT TO authenticated
+    USING (id = public.current_student_id() OR public.is_staff_of_student(id));
+
+-- enrollments: staff ve la matrícula de su sección; cada uno, la propia
+DROP POLICY IF EXISTS rls_enrollments_select ON public.enrollments;
+CREATE POLICY rls_enrollments_select ON public.enrollments FOR SELECT TO authenticated
+    USING (
+        public.is_section_staff(section_id)
+        OR (student_id IS NOT NULL AND student_id = public.current_student_id())
+        OR (user_id IS NOT NULL AND user_id = public.current_app_user_id())
+    );
+
+-- class_sessions: miembros leen; el docente cambia estado/horario (crear sesiones: solo servidor)
+DROP POLICY IF EXISTS rls_class_sessions_select ON public.class_sessions;
+CREATE POLICY rls_class_sessions_select ON public.class_sessions FOR SELECT TO authenticated
+    USING (public.is_section_member(section_id));
+DROP POLICY IF EXISTS rls_class_sessions_update_teacher ON public.class_sessions;
+CREATE POLICY rls_class_sessions_update_teacher ON public.class_sessions FOR UPDATE TO authenticated
+    USING (public.is_section_teacher(section_id)) WITH CHECK (public.is_section_teacher(section_id));
+
+-- attendance_records: staff lee su sección; estudiante, solo lo suyo. Sin escritura directa.
+DROP POLICY IF EXISTS rls_attendance_records_select ON public.attendance_records;
+CREATE POLICY rls_attendance_records_select ON public.attendance_records FOR SELECT TO authenticated
+    USING (public.is_section_staff(public.section_of_session(session_id)) OR student_id = public.current_student_id());
+
+-- student_work_records: staff lee; docente escribe; estudiante lee lo suyo
+DROP POLICY IF EXISTS rls_work_records_select ON public.student_work_records;
+CREATE POLICY rls_work_records_select ON public.student_work_records FOR SELECT TO authenticated
+    USING (public.is_section_staff(section_id) OR student_id = public.current_student_id());
+DROP POLICY IF EXISTS rls_work_records_insert_teacher ON public.student_work_records;
+CREATE POLICY rls_work_records_insert_teacher ON public.student_work_records FOR INSERT TO authenticated
+    WITH CHECK (public.is_section_teacher(section_id));
+DROP POLICY IF EXISTS rls_work_records_update_teacher ON public.student_work_records;
+CREATE POLICY rls_work_records_update_teacher ON public.student_work_records FOR UPDATE TO authenticated
+    USING (public.is_section_teacher(section_id)) WITH CHECK (public.is_section_teacher(section_id));
+
+-- activities: staff lee; docente gestiona; estudiante ve las publicadas de su sección
+DROP POLICY IF EXISTS rls_activities_select ON public.activities;
+CREATE POLICY rls_activities_select ON public.activities FOR SELECT TO authenticated
+    USING (public.is_section_staff(section_id) OR (is_published AND public.is_section_member(section_id)));
+DROP POLICY IF EXISTS rls_activities_insert_teacher ON public.activities;
+CREATE POLICY rls_activities_insert_teacher ON public.activities FOR INSERT TO authenticated
+    WITH CHECK (public.is_section_teacher(section_id));
+DROP POLICY IF EXISTS rls_activities_update_teacher ON public.activities;
+CREATE POLICY rls_activities_update_teacher ON public.activities FOR UPDATE TO authenticated
+    USING (public.is_section_teacher(section_id)) WITH CHECK (public.is_section_teacher(section_id));
+DROP POLICY IF EXISTS rls_activities_delete_teacher ON public.activities;
+CREATE POLICY rls_activities_delete_teacher ON public.activities FOR DELETE TO authenticated
+    USING (public.is_section_teacher(section_id));
+
+-- activity_submissions: staff lee; docente crea; docente y ayudante corrigen; estudiante lee lo suyo
+DROP POLICY IF EXISTS rls_submissions_select ON public.activity_submissions;
+CREATE POLICY rls_submissions_select ON public.activity_submissions FOR SELECT TO authenticated
+    USING (public.is_section_staff(public.section_of_activity(activity_id)) OR student_id = public.current_student_id());
+DROP POLICY IF EXISTS rls_submissions_insert_teacher ON public.activity_submissions;
+CREATE POLICY rls_submissions_insert_teacher ON public.activity_submissions FOR INSERT TO authenticated
+    WITH CHECK (public.is_section_teacher(public.section_of_activity(activity_id)));
+DROP POLICY IF EXISTS rls_submissions_update_staff ON public.activity_submissions;
+CREATE POLICY rls_submissions_update_staff ON public.activity_submissions FOR UPDATE TO authenticated
+    USING (public.is_section_staff(public.section_of_activity(activity_id)))
+    WITH CHECK (public.is_section_staff(public.section_of_activity(activity_id)));
 
 -- Semilla Institucional UDP Inicial (Idempotente)
 INSERT INTO public.institutions (code, name, domain, canvas_base_url)
