@@ -1,5 +1,6 @@
 from enum import Enum
-from typing import List, Optional, Dict, Any
+from typing import List, Literal, Optional, Dict, Any
+from uuid import UUID
 from pydantic import BaseModel, Field
 
 class AgentLevel(str, Enum):
@@ -59,11 +60,19 @@ class RubricItem(BaseModel):
     descriptores: List[str] = Field(default_factory=list)
 
 class SubmissionEvaluationRequest(BaseModel):
-    student_solution: str
-    assignment_title: str
-    course_id: str = "course:cit3203"
-    rubric: List[RubricItem]
-    max_decimas: float = 0.6
+    """
+    Evalúa una versión ya ingerida (IA-05). El texto y la rúbrica salen de la base (la de `activities.rubric_json`
+    manda); `rubric` solo se usa si la actividad no tiene rúbrica. `student_solution` queda por compatibilidad y
+    se ignora: el texto evaluado y citado es siempre `submission_versions.texto_extraido`.
+    """
+    version_id: UUID
+    actor: Optional[UUID] = Field(default=None, description="users.id de quien pide la evaluación (auditoría)")
+    course_id: str = Field(default="course:cit3203", description="Nodo del árbol jerárquico (PedagogicalSettings)")
+    settings: Optional[PedagogicalSettings] = None
+    max_decimas: float = Field(default=0.6, ge=0)
+    assignment_title: Optional[str] = None
+    rubric: Optional[List[RubricItem]] = None
+    student_solution: Optional[str] = Field(default=None, description="Obsoleto: se ignora")
 
 class CriteriaScore(BaseModel):
     criterio: str
@@ -72,13 +81,71 @@ class CriteriaScore(BaseModel):
     cita_textual: str
     comentario: str
 
+ObservationType = Literal["criterio", "feedback_no_abordado", "retroceso", "inconsistencia", "atraso"]
+Severity = Literal["baja", "media", "alta"]
+ObservationDecision = Literal["pendiente", "aceptada", "rechazada", "editada"]
+
+
+class ObservationCitation(BaseModel):
+    """Fragmento literal de `texto_extraido`; offsets Unicode base cero, intervalo [char_start, char_end)."""
+    version: Literal["actual", "anterior"]
+    version_id: str
+    texto: str
+    char_start: int
+    char_end: int
+
+
+class ReviewObservation(BaseModel):
+    id: Optional[str] = None
+    criterio: Optional[str] = None
+    tipo: ObservationType
+    severidad: Severity
+    texto: str
+    cita: ObservationCitation
+    estado_docente: ObservationDecision = "pendiente"
+
+
 class SubmissionEvaluationResponse(BaseModel):
-    nota_sugerida: float
+    nota_sugerida: float  # = nota_preliminar + décimas (tope 7,0); propuesta, nunca nota final
     decimas_sugeridas: float
     resumen_feedback: str
     criterios_evaluados: List[CriteriaScore]
     sugerencias_mejora: List[str]
     profesor_revisor_pendiente: bool = True
+    # IA-08 (opcionales, compatibles con el contrato anterior)
+    review_id: Optional[str] = None
+    nota_preliminar: Optional[float] = None
+    observaciones: Optional[List[ReviewObservation]] = None
+    citas_descartadas: Optional[int] = None
+    modelo: Optional[str] = None
+
+
+class ReviewConfirmRequest(BaseModel):
+    actor: UUID = Field(description="users.id del docente de la sección (lo autentica el puente de IA-09)")
+    nota_final: Optional[float] = Field(default=None, ge=1.0, le=7.0, description="Sin valor: nota preliminar + décimas")
+
+
+class ObservationDecisionRequest(BaseModel):
+    actor: UUID = Field(description="users.id del docente de la sección (lo autentica el puente de IA-09)")
+    estado_docente: Literal["aceptada", "rechazada", "editada"]
+    texto: Optional[str] = Field(default=None, max_length=4000, description="Obligatorio si estado_docente = editada")
+
+
+class ReviewResponse(BaseModel):
+    """Revisión de IA con sus observaciones. Contiene notas preliminares y citas: solo para staff de la sección."""
+    id: str
+    version_id: str
+    agente: str
+    modelo: str
+    estado: Literal["propuesta", "confirmada", "corregida"]
+    nota_preliminar: Optional[float] = None
+    decimas_preliminares: Optional[float] = None
+    resumen: str
+    nota_final: Optional[float] = None
+    confirmada_por: Optional[str] = None
+    confirmada_en: Optional[str] = None
+    observaciones: List[ReviewObservation] = Field(default_factory=list)
+    pendientes: int = 0
 
 class SubmissionVersionResponse(BaseModel):
     """Resultado de la ingesta de un PDF (IA-05). No expone la ruta interna de Storage."""

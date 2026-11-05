@@ -21,14 +21,22 @@ from core.models import (
     AuditReportResponse,
     CourseMaterialRequest,
     RagIndexResponse,
+    ReviewResponse,
+    ReviewConfirmRequest,
+    ObservationDecisionRequest,
 )
 from core.submission_ingest import IngestError, ingest_submission_pdf
-from core.llm_support import LLMError, LLMNotConfigured
+from core.llm_support import LLMError, LLMNotConfigured, LLMValidationError
+from core.review_store import (
+    ReviewAlreadyConfirmed, ReviewForbidden, ReviewInvalid, ReviewNotFound, ReviewPending, SupabaseReviewStore,
+    to_review_response,
+)
 from core.submission_store import StoreError, StoreNotConfigured, SubmissionStore
 from rag.indexer import BACKFILL_MAX, IndexReport, RagIndexer, RagInputError, RagNotFound, auto_index_version
 from core.hierarchy import hierarchy_manager
 from agents.root import root_agent
-from agents.specialists.submission_evaluator import submission_evaluator_worker
+from agents.specialists.evidence import PrivacyGuardError
+from agents.specialists.submission_evaluator import EvaluatorInputError, submission_evaluator_worker
 from agents.specialists.activity_designer import activity_designer_worker
 from protocols.agent_card import get_agent_card
 from core.audit import AuditNotConfigured, setup_audit
@@ -174,18 +182,98 @@ def handle_agent_chat(request: AgentChatRequest):
             content={"error": "No se pudo procesar la solicitud con el agente en este momento."}
         )
 
+def _error(status: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"error": message, "code": code})
+
+def _evaluation_error(exc: Exception) -> JSONResponse:
+    """Errores del evaluador con código estable y mensaje genérico (Regla 12): el detalle queda solo en el log."""
+    if isinstance(exc, EvaluatorInputError):
+        return _error(exc.status, exc.code, exc.message)
+    if isinstance(exc, LLMNotConfigured):
+        return _error(503, "IA_NO_CONFIGURADA", "El evaluador de IA no está configurado (falta endpoint o llave del modelo).")
+    if isinstance(exc, StoreNotConfigured):
+        return _error(503, "ALMACENAMIENTO_NO_CONFIGURADO", "Servicio no disponible.")
+    if isinstance(exc, PrivacyGuardError):
+        logger.error("Evaluador: la seudonimización no fue estable; no se envió nada al modelo")
+        return _error(500, "SEUDONIMIZACION_FALLIDA", "No se pudo proteger la entrega antes de evaluarla.")
+    if isinstance(exc, LLMValidationError):
+        logger.error("Evaluador: respuesta del modelo inválida (%s)", type(exc).__name__)
+        return _error(502, "IA_RESPUESTA_INVALIDA", "El modelo no entregó una evaluación válida. Intenta nuevamente.")
+    if isinstance(exc, LLMError):
+        logger.error("Evaluador: el modelo falló (%s)", type(exc).__name__)
+        return _error(502, "IA_NO_DISPONIBLE", "No se pudo evaluar la entrega en este momento.")
+    if isinstance(exc, StoreError):
+        return _error(502, "ALMACENAMIENTO_NO_DISPONIBLE", "No se pudo acceder al almacenamiento en este momento.")
+    logger.exception("Fallo inesperado al evaluar la entrega")
+    return _error(500, "ERROR_INTERNO", "No se pudo procesar la solicitud en este momento.")
+
+def _review_error(exc: Exception) -> JSONResponse:
+    if isinstance(exc, ReviewNotFound):
+        return _error(404, "NO_ENCONTRADO", "No se encontró la revisión u observación.")
+    if isinstance(exc, ReviewForbidden):
+        return _error(403, "NO_AUTORIZADO", "Solo el docente de la sección puede realizar esta acción.")
+    if isinstance(exc, ReviewPending):
+        return _error(409, "OBSERVACIONES_PENDIENTES", "Quedan observaciones pendientes de revisión.")
+    if isinstance(exc, ReviewAlreadyConfirmed):
+        return _error(409, "REVISION_CONFIRMADA", "La revisión ya fue confirmada.")
+    if isinstance(exc, ReviewInvalid):
+        return _error(422, "DATOS_INVALIDOS", "Los datos enviados no son válidos.")
+    return _evaluation_error(exc)
+
+def get_review_store() -> SupabaseReviewStore:
+    try:
+        return SupabaseReviewStore()
+    except StoreNotConfigured:
+        raise HTTPException(status_code=503, detail="Servicio no disponible.")
+
 @app.post("/api/v1/agent/evaluate", response_model=SubmissionEvaluationResponse, dependencies=[Depends(require_service_key)])
 def handle_submission_evaluation(request: SubmissionEvaluationRequest):
     """
-    Endpoint especializado para corrección asistida y cálculo de décimas.
+    Pre-corrección de una versión (IA-08): propuesta con citas verificadas, guardada en ai_reviews (`propuesta`)
+    y ai_observations (`pendiente`). Nunca escribe nota_final. Sin modelo configurado: 503 IA_NO_CONFIGURADA.
     """
     try:
         return submission_evaluator_worker.evaluate_submission(request)
-    except Exception:
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Error interno al evaluar la entrega."}
-        )
+    except Exception as exc:
+        return _evaluation_error(exc)
+
+@app.get("/api/v1/reviews/{review_id}", response_model=ReviewResponse, dependencies=[Depends(require_service_key)])
+def get_review(review_id: UUID, store: SupabaseReviewStore = Depends(get_review_store)):
+    """Revisión con observaciones. Trae notas preliminares y citas: el puente (IA-09) debe limitarla al staff."""
+    try:
+        row = store.get_review(str(review_id))
+        if row is None:
+            raise ReviewNotFound("Revisión inexistente")
+        return to_review_response(row)
+    except Exception as exc:
+        return _review_error(exc)
+
+@app.patch("/api/v1/observations/{observation_id}", response_model=ReviewResponse, dependencies=[Depends(require_service_key)])
+def decide_observation(observation_id: UUID, body: ObservationDecisionRequest, store: SupabaseReviewStore = Depends(get_review_store)):
+    """Decisión del docente (aceptada | rechazada | editada). Devuelve la revisión actualizada."""
+    try:
+        row = store.decide_observation(str(observation_id), str(body.actor), body.estado_docente, body.texto)
+        review = store.get_review(str(row["review_id"]))
+        if review is None:
+            raise ReviewNotFound("Revisión inexistente")
+        return to_review_response(review)
+    except Exception as exc:
+        return _review_error(exc)
+
+@app.post("/api/v1/reviews/{review_id}/confirm", response_model=ReviewResponse, dependencies=[Depends(require_service_key)])
+def confirm_review(review_id: UUID, body: ReviewConfirmRequest, store: SupabaseReviewStore = Depends(get_review_store)):
+    """
+    Único camino a nota_final: docente activo de la sección (`actor`, lo autentica el puente de IA-09) y cero
+    observaciones pendientes. Sin `nota_final`, confirma la propuesta (nota preliminar + décimas, tope 7,0).
+    """
+    try:
+        store.confirm_review(str(review_id), str(body.actor), body.nota_final)
+        review = store.get_review(str(review_id))
+        if review is None:
+            raise ReviewNotFound("Revisión inexistente")
+        return to_review_response(review)
+    except Exception as exc:
+        return _review_error(exc)
 
 @app.post("/api/v1/agent/design-activity", response_model=ActivityDesignResponse, dependencies=[Depends(require_service_key)])
 def handle_activity_design(request: ActivityDesignRequest):

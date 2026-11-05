@@ -45,7 +45,19 @@ class AgentSettings(_BaseClass):
     openrouter_base_url: str = Field(default_factory=lambda: os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))
     default_openrouter_model: str = Field(default_factory=lambda: os.getenv("DEFAULT_OPENROUTER_MODEL", "openrouter/free"))
     activity_designer_model: str = Field(default_factory=lambda: os.getenv("ACTIVITY_DESIGNER_MODEL", "openrouter/free"))
-    evaluator_model: str = Field(default_factory=lambda: os.getenv("EVALUATOR_MODEL", "openrouter/free"))
+    # Evaluador de entregas (IA-08). Modelo abierto: en producción, Qwen servido con vLLM en la UDP
+    # (EVALUATOR_BASE_URL); sin endpoint propio cae a OpenRouter con su llave.
+    evaluator_model: str = Field(default_factory=lambda: os.getenv("EVALUATOR_MODEL", "qwen/qwen3.8-27b"))
+    evaluator_base_url: str = Field(default_factory=lambda: os.getenv("EVALUATOR_BASE_URL", ""))
+    evaluator_api_key: str = Field(default_factory=lambda: os.getenv("EVALUATOR_API_KEY", ""))
+    evaluator_timeout_s: float = Field(default_factory=lambda: float(os.getenv("EVALUATOR_TIMEOUT_S", "120")), gt=0)
+    evaluator_max_tokens: int = Field(default_factory=lambda: int(os.getenv("EVALUATOR_MAX_TOKENS", "4000")), gt=0)
+    # Entregas hasta este largo van completas; más largas, por fragmentos RAG por criterio.
+    evaluator_max_text_chars: int = Field(default_factory=lambda: int(os.getenv("EVALUATOR_MAX_TEXT_KCHARS", "48")) * 1000, gt=0)
+    evaluator_rag_top_k: int = Field(default_factory=lambda: int(os.getenv("EVALUATOR_RAG_TOP_K", "3")), ge=1, le=20)
+    evaluator_min_cita_chars: int = Field(default_factory=lambda: int(os.getenv("EVALUATOR_MIN_CITA_CHARS", "8")), ge=1)
+    # Proporción del puntaje que equivale a la nota 4,0 (escala chilena 1,0–7,0).
+    evaluator_exigencia: float = Field(default_factory=lambda: float(os.getenv("EVALUATOR_EXIGENCIA", "0.6")), gt=0, lt=1)
     # IA-04: contrato de rag_chunks.embedding; cambiarlo exige migración y reindexación.
     embedding_model: str = Field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-small"))
     embedding_dim: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "1536")), gt=0)
@@ -68,8 +80,9 @@ class AgentSettings(_BaseClass):
             return value.strip().lower() in ("1", "true", "yes")
         return value
 
-    # Prefijos de modelo que aceptan response_format json_schema estricto (separados por coma).
-    llm_json_schema_models: str = Field(default_factory=lambda: os.getenv("LLM_JSON_SCHEMA_MODELS", "openai/,google/"))
+    # Qué usa response_format json_schema estricto (separados por coma): prefijos de modelo (`qwen/`) o de
+    # endpoint (`https://llm.udp.cl/v1`, p. ej. vLLM, que lo soporta con decodificación guiada).
+    llm_json_schema_models: str = Field(default_factory=lambda: os.getenv("LLM_JSON_SCHEMA_MODELS", "openai/,google/,qwen/,deepseek/"))
 
     # Modelo del chat jerárquico (core/engine.py), vía OpenRouter; mismo modelo que se usaba directo con Gemini.
     chat_model: str = Field(default_factory=lambda: os.getenv("CHAT_MODEL", "google/gemini-2.5-flash"))

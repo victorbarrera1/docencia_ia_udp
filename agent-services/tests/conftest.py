@@ -6,6 +6,14 @@ os.environ["ENVIRONMENT"] = "test"
 os.environ["OPENROUTER_API_KEY"] = ""
 os.environ["GEMINI_API_KEY"] = ""
 os.environ["LLM_FAKE"] = "0"
+# Evaluador (IA-08): valores fijos para que un .env local (otro modelo o un endpoint vLLM) no cambie los tests.
+os.environ["EVALUATOR_MODEL"] = "qwen/qwen3.8-27b"
+os.environ["EVALUATOR_BASE_URL"] = ""
+os.environ["EVALUATOR_API_KEY"] = ""
+os.environ["LLM_JSON_SCHEMA_MODELS"] = "openai/,google/,qwen/,deepseek/"
+for _var, _value in (("EVALUATOR_MAX_TEXT_KCHARS", "48"), ("EVALUATOR_RAG_TOP_K", "3"), ("EVALUATOR_MIN_CITA_CHARS", "8"),
+                     ("EVALUATOR_EXIGENCIA", "0.6"), ("EVALUATOR_MAX_TOKENS", "4000"), ("EVALUATOR_TIMEOUT_S", "120")):
+    os.environ[_var] = _value
 # Sin Supabase real: los tests no deben depender del .env local (en CI no existe).
 for _var in (
     "SUPABASE_URL",
