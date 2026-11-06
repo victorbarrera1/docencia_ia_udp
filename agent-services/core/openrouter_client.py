@@ -4,6 +4,7 @@ import math
 import random
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -41,17 +42,51 @@ class OpenRouterClient:
     Cliente oficial y tipado para OpenRouter API v1 (Guía Maestra).
     Soporta Auto Router, Cost Tiers, Session Stickiness y Tool Calling, más salida JSON validada,
     reintentos con backoff, hook de auditoría y modo fake determinista (LLM_FAKE=1).
+
+    También habla con cualquier servidor compatible con la API de OpenAI (p. ej. vLLM en la UDP) si se le
+    pasa `base_url`: en ese caso no envía los extras propios de OpenRouter y la llave es opcional.
+    Usar `endpoint_client` para construirlo: nunca envía OPENROUTER_API_KEY a otro host.
     """
-    def __init__(self, transport: Optional[httpx.BaseTransport] = None):
-        self.api_key = settings.openrouter_api_key
-        self.base_url = settings.openrouter_base_url.rstrip("/")
+    def __init__(
+        self,
+        transport: Optional[httpx.BaseTransport] = None,
+        *,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        timeout_s: Optional[float] = None,
+    ):
+        self.api_key = settings.openrouter_api_key if api_key is None else api_key
+        self.base_url = (base_url or settings.openrouter_base_url).rstrip("/")
         self.site_url = settings.openrouter_site_url
         self.site_name = settings.openrouter_site_name
         self._transport = transport  # inyectable en tests (httpx.MockTransport)
+        self._timeout_s = timeout_s
         self._sleep = time.sleep
 
+    @property
+    def is_openrouter(self) -> bool:
+        return (urlparse(self.base_url).hostname or "").endswith("openrouter.ai")
+
     def is_configured(self) -> bool:
-        return settings.llm_fake or bool(self.api_key and len(self.api_key) > 5)
+        if settings.llm_fake or bool(self.api_key and len(self.api_key) > 5):
+            return True
+        # Un servidor propio (vLLM) puede no exigir llave; OpenRouter siempre la exige.
+        return not self.is_openrouter and bool(urlparse(self.base_url).hostname)
+
+    def uses_json_schema(self, model: str) -> bool:
+        """
+        ¿Pedir response_format json_schema? LLM_JSON_SCHEMA_MODELS admite prefijos de modelo (`qwen/`) y
+        prefijos de endpoint (`https://llm.udp.cl/v1`), separados por coma.
+        """
+        for entry in (e.strip() for e in settings.llm_json_schema_models.split(",")):
+            if not entry:
+                continue
+            if entry.startswith(("http://", "https://")):
+                if self.base_url.startswith(entry.rstrip("/")):
+                    return True
+            elif model.startswith(entry):
+                return True
+        return False
 
     # ---------- API pública ----------
 
@@ -150,7 +185,7 @@ class OpenRouterClient:
 
         target = model or settings.default_openrouter_model
         schema_dict = schema.model_json_schema()
-        structured = any(target.startswith(p.strip()) for p in settings.llm_json_schema_models.split(",") if p.strip())
+        structured = self.uses_json_schema(target)
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         if not structured:
             messages[0]["content"] += (
@@ -260,10 +295,11 @@ class OpenRouterClient:
         self._notify(meta, context)
         raise error
 
-    @staticmethod
-    def _payload(messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int) -> Dict[str, Any]:
-        return {"model": model, "messages": messages, "temperature": temperature,
-                "max_tokens": max_tokens, "usage": {"include": True}}
+    def _payload(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+        if self.is_openrouter:
+            payload["usage"] = {"include": True}  # costo en la respuesta; un servidor propio no lo informa (NULL)
+        return payload
 
     @staticmethod
     def _first_message(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -296,16 +332,16 @@ class OpenRouterClient:
 
     def _send(self, payload: Dict[str, Any], sent: Dict[str, int], path: str = "/chat/completions") -> Dict[str, Any]:
         """POST con reintentos (429, 5xx, timeouts y errores de conexión). `sent["n"]` cuenta las peticiones."""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "HTTP-Referer": self.site_url,
-            "X-OpenRouter-Title": self.site_name,
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.is_openrouter:
+            headers.update({"HTTP-Referer": self.site_url, "X-OpenRouter-Title": self.site_name})
+        timeout = self._timeout_s or settings.llm_timeout_s
         while True:
             sent["n"] += 1
             try:
-                with httpx.Client(timeout=settings.llm_timeout_s, transport=self._transport) as http:
+                with httpx.Client(timeout=timeout, transport=self._transport) as http:
                     res = http.post(f"{self.base_url}{path}", headers=headers, json=payload)
                 error = self._http_error(res)
                 if error is None:
@@ -338,3 +374,17 @@ class OpenRouterClient:
 
 
 openrouter_client = OpenRouterClient()
+
+
+def endpoint_client(base_url: str = "", api_key: str = "", timeout_s: Optional[float] = None) -> OpenRouterClient:
+    """
+    Cliente para un agente con endpoint configurable (p. ej. EVALUATOR_BASE_URL → vLLM de la UDP).
+
+    Sin `base_url` propia (o igual a OPENROUTER_BASE_URL) usa OpenRouter con `api_key` o, si viene vacía,
+    OPENROUTER_API_KEY. Con `base_url` propia usa solo `api_key` (puede ir vacía): la llave de OpenRouter
+    nunca viaja a otro host. Mismos reintentos, auditoría y modo fake que el cliente por defecto.
+    """
+    custom = base_url.strip().rstrip("/")
+    if not custom or custom == settings.openrouter_base_url.rstrip("/"):
+        return OpenRouterClient(api_key=api_key or None, timeout_s=timeout_s)
+    return OpenRouterClient(base_url=custom, api_key=api_key, timeout_s=timeout_s)

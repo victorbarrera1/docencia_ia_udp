@@ -67,5 +67,6 @@ El sistema no utiliza un chatbot plano, sino un árbol de herencia de políticas
 - `GET /.well-known/agent-card.json`: Manifiesto estándar **Agent2Agent (A2A)**.
 - `GET /api/v1/tree/hierarchy`: Exploración del árbol completo y sus directivas.
 - `POST /api/v1/agent/chat`: Consulta con linaje jerárquico compilado.
-- `POST /api/v1/agent/evaluate`: Evaluación asistida de entregas con citas a la pauta.
+- `POST /api/v1/agent/evaluate`: Pre-corrección de una versión (`version_id`) con citas verificadas; guarda una propuesta (IA-08, ver `docs/backend-ia/evaluador-ia.md`).
+- `GET /api/v1/reviews/{id}`, `PATCH /api/v1/observations/{id}`, `POST /api/v1/reviews/{id}/confirm`: revisión docente; confirmar es el único camino a la nota final.
 - `POST /api/v1/agent/stream`: Streaming Server-Sent Events (SSE).

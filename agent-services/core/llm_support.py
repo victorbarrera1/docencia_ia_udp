@@ -77,9 +77,12 @@ def harden_schema(node: Any) -> Any:
     return out
 
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
 def extract_json(text: str) -> Any:
     """Parsea JSON de una respuesta, tolerando fences ```json y texto alrededor del objeto."""
-    text = (text or "").strip()
+    text = _THINK_RE.sub("", text or "").strip()  # modelos con razonamiento visible (Qwen en vLLM)
     fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
     if fenced:
         text = fenced.group(1)
